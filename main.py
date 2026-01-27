@@ -10,11 +10,12 @@ from telethon.sessions import StringSession
 from aiohttp import web
 from config import (
     API_ID, API_HASH, BOT_TOKEN, ADMIN_ID,
-    SOURCE_CHANNEL_ID, SOURCE_CHANNEL_2_ID, PREDICTION_CHANNEL_ID, PORT,
+    SOURCE_CHANNEL_ID, SOURCE_CHANNEL_2_ID, PORT,
     SUIT_MAPPING, ALL_SUITS, SUIT_DISPLAY
 )
 
 PAYMENT_LINK = "https://my.moneyfusion.net/6977f7502181d4ebf722398d"
+PAYMENT_LINK_24H = "https://my.moneyfusion.net/6977f7502181d4ebf722398d"
 USERS_FILE = "users_data.json"
 
 # --- Configuration et Initialisation ---
@@ -38,7 +39,7 @@ if not BOT_TOKEN:
     logger.error("BOT_TOKEN manquant")
     exit(1)
 
-logger.info(f"Configuration: SOURCE_CHANNEL={SOURCE_CHANNEL_ID}, SOURCE_CHANNEL_2={SOURCE_CHANNEL_2_ID}, PREDICTION_CHANNEL={PREDICTION_CHANNEL_ID}")
+logger.info(f"Configuration: SOURCE_CHANNEL={SOURCE_CHANNEL_ID}, SOURCE_CHANNEL_2={SOURCE_CHANNEL_2_ID}")
 
 # Initialisation du client Telegram avec session string ou nouvelle session
 session_string = os.getenv('TELEGRAM_SESSION', '')
@@ -46,7 +47,7 @@ client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 # Variables Globales d'État
 SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
-TIME_CYCLE = [3, 5, 2, 7, 4]
+TIME_CYCLE = [6, 8, 4, 7, 9]
 current_time_cycle_index = 0
 next_prediction_allowed_at = datetime.now()
 
@@ -67,6 +68,7 @@ def get_rule1_suit(game_number: int) -> str | None:
 
 scp_cooldown = 0
 scp_history = []  # Historique des impositions SCP
+already_predicted_games = set()  # Pour éviter de prédire le même numéro deux fois
 
 pending_predictions = {}
 queued_predictions = {}
@@ -82,11 +84,10 @@ stats_bilan = {
     'win_details': {'✅0️⃣': 0, '✅1️⃣': 0, '✅2️⃣': 0},
     'loss_details': {'❌': 0}
 }
-bilan_interval = 20
+bilan_interval = 60
 last_bilan_time = datetime.now()
 
 source_channel_ok = False
-prediction_channel_ok = False
 transfer_enabled = True
 
 # --- Système de Paiement et Utilisateurs ---
@@ -162,31 +163,47 @@ def is_trial_active(user_id: int) -> bool:
         return False
 
 def can_receive_predictions(user_id: int) -> bool:
+    user = get_user(user_id)
+    if not user.get('registered'):
+        return False
     return is_user_subscribed(user_id) or is_trial_active(user_id)
 
 def get_subscription_type(user_id: int) -> str:
     user = get_user(user_id)
     return user.get('subscription_type', None)
 
-async def send_prediction_to_user(user_id: int, prediction_msg: str):
+async def send_prediction_to_user(user_id: int, prediction_msg: str, target_game: int):
     try:
         if not can_receive_predictions(user_id):
             user = get_user(user_id)
-            # Si l'abonnement vient juste d'expirer et qu'on n'a pas encore envoyé le message de fin
             if user.get('subscription_end') and not user.get('expiry_notified', False):
                 expiry_msg = (
                     "⚠️ **Votre abonnement a expiré !**\n\n"
                     "Ne laissez pas la chance s'échapper ! 🎰 Nos algorithmes sont actuellement en pleine performance avec un taux de réussite exceptionnel. 🚀\n\n"
                     "Réactivez votre accès maintenant pour ne rater aucune opportunité de gagner gros aujourd'hui. Votre succès n'attend que vous ! 💰🎯"
                 )
-                buttons = [[Button.url("🔄 RENOUVELER L'ABONNEMENT", PAYMENT_LINK)]]
+                buttons = [
+                    [Button.url("💳 24 HEURES (200 FCFA)", PAYMENT_LINK_24H)],
+                    [Button.url("💳 1 SEMAINE (1000 FCFA)", PAYMENT_LINK)],
+                    [Button.url("💳 2 SEMAINES (2000 FCFA)", PAYMENT_LINK)]
+                ]
                 await client.send_message(user_id, expiry_msg, buttons=buttons)
                 update_user(user_id, {'expiry_notified': True})
                 logger.info(f"Notification d'expiration envoyée à {user_id}")
             return
 
-        await client.send_message(user_id, prediction_msg)
-        logger.info(f"Prédiction envoyée en privé à l'utilisateur {user_id}")
+        sent_msg = await client.send_message(user_id, prediction_msg)
+        
+        # Stockage de l'ID du message privé pour édition ultérieure
+        user_id_str = str(user_id)
+        if target_game not in pending_predictions:
+            pending_predictions[target_game] = {'private_messages': {}}
+        
+        if 'private_messages' not in pending_predictions[target_game]:
+            pending_predictions[target_game]['private_messages'] = {}
+            
+        pending_predictions[target_game]['private_messages'][user_id_str] = sent_msg.id
+        logger.info(f"Prédiction envoyée en privé à {user_id} (Msg ID: {sent_msg.id})")
     except Exception as e:
         logger.error(f"Erreur envoi prédiction privée à {user_id}: {e}")
 
@@ -285,40 +302,37 @@ async def send_prediction_to_channel(target_game: int, predicted_suit: str, base
 
         # Nouveau format de message plus joli demandé par l'utilisateur
         prediction_msg = f"🔵{target_game}  🌀 {SUIT_DISPLAY.get(predicted_suit, predicted_suit)} : ⌛"
-        msg_id = 0
 
-        if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0 and prediction_channel_ok:
-            try:
-                pred_msg = await client.send_message(PREDICTION_CHANNEL_ID, prediction_msg)
-                msg_id = pred_msg.id
-                logger.info(f"✅ Prédiction envoyée au canal de prédiction {PREDICTION_CHANNEL_ID}")
-            except Exception as e:
-                logger.error(f"❌ Erreur envoi prédiction au canal: {e}")
-        else:
-            logger.warning(f"⚠️ Canal de prédiction non accessible, prédiction non envoyée")
-
+        # Envoi uniquement aux utilisateurs actifs en chat privé (pas de canal de prédiction)
         for user_id_str, user_info in users_data.items():
             try:
                 user_id = int(user_id_str)
-                # On envoie à tous ceux qui ont un abonnement actif (trial ou premium)
+                # On envoie seulement à ceux qui ont un abonnement actif ou période d'essai active
                 if can_receive_predictions(user_id):
-                    logger.info(f"Envoi prédiction à {user_id}")
-                    await send_prediction_to_user(user_id, prediction_msg)
+                    logger.info(f"Envoi prédiction privée à {user_id}")
+                    await send_prediction_to_user(user_id, prediction_msg, target_game)
+                else:
+                    # Si l'utilisateur est enregistré mais expiré, envoyer notification de blocage
+                    if user_info.get('registered'):
+                        await send_prediction_to_user(user_id, prediction_msg, target_game)
             except Exception as e:
                 logger.error(f"Erreur envoi privé à {user_id_str}: {e}")
 
-        pending_predictions[target_game] = {
-            'message_id': 0, # On ne stocke plus d'ID de message car plus d'envoi canal
+        if target_game not in pending_predictions:
+            pending_predictions[target_game] = {}
+            
+        pending_predictions[target_game].update({
+            'message_id': 0, 
             'suit': predicted_suit,
             'base_game': base_game,
             'status': '⌛',
             'check_count': 0,
             'rattrapage': 0,
             'created_at': datetime.now().isoformat()
-        }
+        })
 
         logger.info(f"Prédiction active: Jeu #{target_game} - {predicted_suit}")
-        return msg_id
+        return 0
 
     except Exception as e:
         logger.error(f"Erreur envoi prédiction: {e}")
@@ -381,15 +395,16 @@ async def update_prediction_status(game_number: int, new_status: str):
         # Format plus joli pour le message mis à jour demandé par l'utilisateur
         updated_msg = f"🔵{game_number}  🌀 {SUIT_DISPLAY.get(suit, suit)} : {new_status}"
 
-        # Envoi de la mise à jour en privé aux utilisateurs abonnés
-        for user_id_str in users_data.keys():
+        # Édition des messages privés au lieu d'en renvoyer
+        private_msgs = pred.get('private_messages', {})
+        for user_id_str, msg_id in private_msgs.items():
             try:
                 user_id = int(user_id_str)
                 if can_receive_predictions(user_id):
-                    logger.info(f"Envoi mise à jour à {user_id}: {new_status}")
-                    await send_prediction_to_user(user_id, updated_msg)
+                    logger.info(f"Édition message pour {user_id}: {new_status}")
+                    await client.edit_message(user_id, msg_id, updated_msg)
             except Exception as e:
-                logger.error(f"Erreur envoi mise à jour à {user_id_str}: {e}")
+                logger.error(f"Erreur édition message pour {user_id_str}: {e}")
 
         pred['status'] = new_status
         
@@ -521,12 +536,15 @@ async def send_bilan():
         f"\nTotal prédictions : {stats_bilan['total']}"
     )
     
-    if PREDICTION_CHANNEL_ID and PREDICTION_CHANNEL_ID != 0 and prediction_channel_ok:
+    # Envoi du bilan aux utilisateurs actifs en chat privé
+    for user_id_str, user_info in users_data.items():
         try:
-            await client.send_message(PREDICTION_CHANNEL_ID, msg)
-            logger.info("✅ Bilan envoyé au canal.")
+            user_id = int(user_id_str)
+            if can_receive_predictions(user_id):
+                await client.send_message(user_id, msg)
+                logger.info(f"✅ Bilan envoyé à {user_id}")
         except Exception as e:
-            logger.error(f"❌ Erreur envoi bilan: {e}")
+            logger.error(f"❌ Erreur envoi bilan à {user_id_str}: {e}")
 
 async def auto_bilan_task():
     """Tâche périodique pour envoyer le bilan."""
@@ -554,7 +572,7 @@ def is_message_finalized(message_text: str) -> bool:
 
 async def process_prediction_logic(message_text: str, chat_id: int):
     """Lance la prédiction selon le cycle de temps."""
-    global last_source_game_number, current_game_number, scp_cooldown, current_time_cycle_index, next_prediction_allowed_at
+    global last_source_game_number, current_game_number, scp_cooldown, current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
     if chat_id != SOURCE_CHANNEL_ID:
         return
         
@@ -564,7 +582,6 @@ async def process_prediction_logic(message_text: str, chat_id: int):
 
     now = datetime.now()
     if now < next_prediction_allowed_at:
-        logger.info(f"Cycle de temps : Attente jusqu'à {next_prediction_allowed_at.strftime('%H:%M:%S')}")
         return
 
     logger.info(f"Cycle de temps : Déclenchement prédiction à {now.strftime('%H:%M:%S')}")
@@ -577,30 +594,23 @@ async def process_prediction_logic(message_text: str, chat_id: int):
         
     logger.info(f"Analyse SCP pour le message reçu (Jeu #{game_number})")
     
-    # Gestion du cycle : s'arrête à 1436, reprend à 6 quand le 4 apparaît
-    next_game = None
-    if game_number == 1436:
-        logger.info("Jeu #1436 atteint. Fin du cycle. Attente du jeu #4 pour reprendre.")
+    # On prédit N+2 : si le canal source est sur 10, on lance le numéro 12
+    candidate = game_number + 2
+    while candidate % 2 != 0 or candidate % 10 == 0:
+        candidate += 1
+    next_game = candidate
+
+    if next_game > 1436:
         return
-    elif game_number == 4:
-        logger.info("Jeu #4 détecté. Reprise du cycle avec la prédiction du jeu #6.")
-        next_game = 6
-    else:
-        # Logique standard pour trouver le prochain numéro PAIR valide
-        candidate = game_number + 1
-        while candidate % 2 != 0 or candidate % 10 == 0:
-            candidate += 1
-        next_game = candidate
-
-        # On ne prédit plus si on dépasse 1436 dans ce cycle
-        if next_game > 1436:
-            logger.info(f"Prochain jeu théorique #{next_game} > 1436. Pas de prédiction.")
-            return
-
-        # Vérification de l'écart standard
-        if next_game != game_number + 2:
-            logger.info(f"SCP : Écart de {next_game - game_number} détecté. Attente du numéro intermédiaire.")
-            return
+    
+    # Vérification anti-doublon : ne pas prédire le même numéro deux fois
+    if next_game in already_predicted_games:
+        logger.info(f"Jeu #{next_game} déjà prédit, ignoré pour éviter doublon.")
+        return
+    
+    # Marquer ce numéro comme prédit
+    already_predicted_games.add(next_game)
+    logger.info(f"Numéro #{next_game} marqué comme prédit (évite doublon)")
     
     # 1. Calcul de la Règle 1
     # On utilise le cycle direct car la normalisation est gérée ici par l'attente du #4
@@ -798,11 +808,13 @@ async def cmd_start(event):
         if is_user_subscribed(user_id) or user_id == admin_id:
             sub_type = "Premium (prédictions privées)" if get_subscription_type(user_id) == 'premium' or user_id == admin_id else "Standard"
             sub_end = user.get('subscription_end', 'Illimité' if user_id == admin_id else 'N/A')
+            # Si l'utilisateur est abonné, on s'assure que expiry_notified est False pour le futur
+            update_user(user_id, {'expiry_notified': False})
             await event.respond(
                 f"🎯 **Bienvenue {user.get('prenom', 'Admin' if user_id == admin_id else '')}!**\n\n"
                 f"✅ Votre accès {sub_type} est actif.\n"
                 f"📅 Expire le: {sub_end[:10] if sub_end and user_id != admin_id else sub_end}\n\n"
-                "Les prédictions sont en cours d'envoi ici dans votre chat privé."
+                "Les prédictions sont envoyées en temps réel ici même dans votre chat privé. 🚀"
             )
         elif is_trial_active(user_id):
             trial_start = datetime.fromisoformat(user['trial_started'])
@@ -881,7 +893,7 @@ async def handle_registration_and_payment(event):
                 f"👤 Prénom: {user.get('prenom')}\n"
                 f"🌍 Pays: {user.get('pays')}\n\n"
                 f"⏰ **Vous avez 10 minutes d'essai GRATUIT!**\n"
-                "Les prédictions seront envoyées dans le canal.\n\n"
+                "Les prédictions seront envoyées ici même dans votre chat privé.\n\n"
                 "Profitez-en! 🎯"
             )
             logger.info(f"Nouvel utilisateur inscrit: {user_id} - {user.get('nom')} {user.get('prenom')} ({user.get('pays')})")
@@ -890,36 +902,46 @@ async def handle_registration_and_payment(event):
     if user.get('awaiting_screenshot') and event.message.photo:
         update_user(user_id, {'awaiting_screenshot': False, 'awaiting_amount': True})
         await event.respond(
-            "📸 **Capture d'écran reçue!**\n\n"
+            f"📸 **Capture d'écran reçue!**\n\n"
             "💰 **Quel montant avez-vous payé?**\n"
-            "Répondez avec: `1000` ou `2000`"
+            "Répondez avec: `200`, `1000` ou `2000`"
         )
         logger.info(f"Screenshot reçu de l'utilisateur {user_id}")
         return
     
     if user.get('awaiting_amount'):
         message_text = event.message.message.strip()
-        if message_text in ['1000', '2000']:
+        if message_text in ['200', '1000', '2000']:
             amount = message_text
             update_user(user_id, {'awaiting_amount': False})
             
             # Notification admin avec bouton de validation
             admin_id = 1190237801
             user_info = get_user(user_id)
+            
+            if amount == '200':
+                dur_text = "24 heures"
+                dur_code = "1d"
+            elif amount == '1000':
+                dur_text = "1 semaine"
+                dur_code = "1w"
+            else:
+                dur_text = "2 semaines"
+                dur_code = "2w"
+
             msg_admin = (
                 "🔔 **NOUVELLE DEMANDE D'ABONNEMENT**\n\n"
                 f"👤 **Utilisateur:** {user_info.get('nom')} {user_info.get('prenom')}\n"
                 f"🆔 **ID:** `{user_id}`\n"
                 f"💰 **Montant annoncé:** {amount} FCFA\n"
-                f"📅 **Type souhaité:** {'1 semaine' if amount == '1000' else '2 semaines'}\n"
+                f"📅 **Type souhaité:** {dur_text}\n"
                 f"📍 **Pays:** {user_info.get('pays')}\n\n"
                 "Veuillez vérifier le paiement et valider l'abonnement."
             )
             
             buttons = [
                 [
-                    Button.inline("✅ Valider 1 Semaine", data=f"valider_{user_id}_1w"),
-                    Button.inline("✅ Valider 2 Semaines", data=f"valider_{user_id}_2w")
+                    Button.inline(f"✅ Valider {dur_text}", data=f"valider_{user_id}_{dur_code}")
                 ],
                 [Button.inline("❌ Rejeter", data=f"rejeter_{user_id}")]
             ]
@@ -933,6 +955,9 @@ async def handle_registration_and_payment(event):
 
             await event.respond("✅ **Demande envoyée !**\nL'administrateur va vérifier votre paiement. Vous recevrez une notification dès que votre accès sera activé.")
             return
+        else:
+            await event.respond("❌ Montant invalide. Répondez avec `200`, `1000` ou `2000`.")
+            return
 
 @client.on(events.CallbackQuery(data=re.compile(b'valider_(\d+)_(.*)')))
 async def handle_validation(event):
@@ -944,8 +969,14 @@ async def handle_validation(event):
     user_id = int(event.data_match.group(1).decode())
     duration = event.data_match.group(2).decode()
     
-    days = 7 if duration == '1w' else 14
     sub_type = 'premium'
+    
+    if duration == '1d':
+        days = 1
+    elif duration == '1w':
+        days = 7
+    else:
+        days = 14
     
     end_date = datetime.now() + timedelta(days=days)
     update_user(user_id, {
@@ -1079,7 +1110,7 @@ async def cmd_reset_all(event):
         await event.respond("❌ Commande réservée à l'administrateur principal.")
         return
     
-    global users_data, pending_predictions, queued_predictions, processed_messages, current_game_number, last_source_game_number, stats_bilan, current_time_cycle_index, next_prediction_allowed_at
+    global users_data, pending_predictions, queued_predictions, processed_messages, current_game_number, last_source_game_number, stats_bilan, current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
     
     # Réinitialisation des données utilisateurs (efface tous les IDs et abonnements)
     users_data = {}
@@ -1089,6 +1120,7 @@ async def cmd_reset_all(event):
     pending_predictions.clear()
     queued_predictions.clear()
     processed_messages.clear()
+    already_predicted_games.clear()
     current_game_number = 0
     last_source_game_number = 0
     current_time_cycle_index = 0
@@ -1139,7 +1171,7 @@ async def cmd_help(event):
 3. Abonnez-vous pour continuer
 
 **💰 Tarifs:**
-- 1000 FCFA = 1 semaine (prédictions dans le canal)
+- 1000 FCFA = 1 semaine (prédictions en privé)
 - 2000 FCFA = 2 semaines (prédictions en privé)
 
 **📝 Commandes:**
@@ -1160,21 +1192,26 @@ async def cmd_payer(event):
         await event.respond("❌ Vous devez d'abord vous inscrire avec /start")
         return
     
-    buttons = [[Button.url("💳 PAYER", PAYMENT_LINK)]]
+    buttons = [
+        [Button.url("💳 24 HEURES (200 FCFA)", PAYMENT_LINK_24H)],
+        [Button.url("💳 1 SEMAINE (1000 FCFA)", PAYMENT_LINK)],
+        [Button.url("💳 2 SEMAINES (2000 FCFA)", PAYMENT_LINK)]
+    ]
     await event.respond(
         "💳 **ABONNEMENT - Bot de Prédiction**\n\n"
         "**Tarifs:**\n"
-        "💰 **1000 FCFA** = 1 semaine (prédictions canal)\n"
-        "💰 **2000 FCFA** = 2 semaines (prédictions privées)\n\n"
+        "💰 **200 FCFA** = 24 heures (privé)\n"
+        "💰 **1000 FCFA** = 1 semaine (privé)\n"
+        "💰 **2000 FCFA** = 2 semaines (privé)\n\n"
         f"👤 Votre ID: `{user_id}`\n\n"
-        "Cliquez sur le bouton ci-dessous pour payer:",
+        "Choisissez votre durée et payez via les liens ci-dessous :",
         buttons=buttons
     )
     await asyncio.sleep(2)
     await event.respond(
         "📸 **Après paiement:**\n"
         "1. Envoyez une capture d'écran de votre paiement\n"
-        "2. Indiquez le montant payé (1000 ou 2000)"
+        "2. Indiquez le montant payé (200, 1000 ou 2000)"
     )
     update_user(user_id, {'pending_payment': True, 'awaiting_screenshot': True})
 
@@ -1219,11 +1256,12 @@ async def schedule_daily_reset():
 
         logger.warning("🚨 RESET QUOTIDIEN À 00h59 WAT DÉCLENCHÉ!")
         
-        global pending_predictions, queued_predictions, processed_messages, last_transferred_game, current_game_number, last_source_game_number, stats_bilan
+        global pending_predictions, queued_predictions, processed_messages, last_transferred_game, current_game_number, last_source_game_number, stats_bilan, already_predicted_games
         
         pending_predictions.clear()
         queued_predictions.clear()
         processed_messages.clear()
+        already_predicted_games.clear()
         last_transferred_game = None
         current_game_number = 0
         last_source_game_number = 0
@@ -1241,7 +1279,7 @@ async def schedule_daily_reset():
 
 async def start_bot():
     """Démarre le client Telegram et les vérifications initiales."""
-    global source_channel_ok, prediction_channel_ok
+    global source_channel_ok
     try:
         logger.info("Démarrage du bot...")
         
@@ -1264,8 +1302,7 @@ async def start_bot():
                     raise e
         
         source_channel_ok = True
-        prediction_channel_ok = True 
-        logger.info("Bot connecté et canaux marqués comme accessibles.")
+        logger.info("Bot connecté et prêt pour les chats privés.")
         return True
     except Exception as e:
         logger.error(f"Erreur démarrage du client Telegram: {e}")

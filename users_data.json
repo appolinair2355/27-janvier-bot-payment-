@@ -1,0 +1,28 @@
+{
+  "8108980315": {
+    "registered": false,
+    "nom": null,
+    "prenom": null,
+    "pays": null,
+    "trial_started": null,
+    "trial_used": false,
+    "subscription_end": null,
+    "subscription_type": null,
+    "pending_payment": false,
+    "awaiting_screenshot": false,
+    "awaiting_amount": false
+  },
+  "1190237801": {
+    "registered": false,
+    "nom": null,
+    "prenom": null,
+    "pays": null,
+    "trial_started": null,
+    "trial_used": false,
+    "subscription_end": null,
+    "subscription_type": null,
+    "pending_payment": false,
+    "awaiting_screenshot": false,
+    "awaiting_amount": false
+  }
+}
