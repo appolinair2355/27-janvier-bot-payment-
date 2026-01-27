@@ -273,6 +273,7 @@ def get_predicted_suit(missing_suit: str) -> str:
     # Assurez-vous que SUIT_MAPPING dans config.py contient :
     # SUIT_MAPPING = {'♠': '♣', '♣': '♠', '♥': '♦', '♦': '♥'}
     return SUIT_MAPPING.get(missing_suit, missing_suit)
+
 # --- Logique de Prédiction et File d'Attente ---
 
 async def send_prediction_to_channel(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None):
@@ -383,19 +384,18 @@ async def check_and_send_queued_predictions(current_game: int):
                 queued_predictions.pop(target_game)
 
 async def update_prediction_status(game_number: int, new_status: str):
-    """Met à jour le message de prédiction dans le canal et les statistiques."""
+    """Met à jour le message de prédiction avec les statuts ✅0️⃣, ✅1️⃣, ✅2️⃣ ou ❌."""
     try:
         if game_number not in pending_predictions:
             return False
 
         pred = pending_predictions[game_number]
-        message_id = pred['message_id']
         suit = pred['suit']
 
-        # Format plus joli pour le message mis à jour demandé par l'utilisateur
+        # Format du message mis à jour avec le statut
         updated_msg = f"🔵{game_number}  🌀 {SUIT_DISPLAY.get(suit, suit)} : {new_status}"
 
-        # Édition des messages privés au lieu d'en renvoyer
+        # Édition des messages privés
         private_msgs = pred.get('private_messages', {})
         for user_id_str, msg_id in private_msgs.items():
             try:
@@ -408,80 +408,73 @@ async def update_prediction_status(game_number: int, new_status: str):
 
         pred['status'] = new_status
         
-        # Mise à jour des statistiques de bilan
-        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '✅3️⃣']:
+        # Mise à jour des statistiques selon le statut
+        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣']:
             stats_bilan['total'] += 1
             stats_bilan['wins'] += 1
-            stats_bilan['win_details'][new_status if new_status != '✅3️⃣' else '✅2️⃣'] += 1
-            # On ne supprime pas immédiatement si on a des prédictions en attente
+            stats_bilan['win_details'][new_status] += 1
             del pending_predictions[game_number]
-            # Dès qu'une prédiction est terminée, on libère pour la suivante
+            # Libération pour la prédiction suivante
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
+            
         elif new_status == '❌':
             stats_bilan['total'] += 1
             stats_bilan['losses'] += 1
             stats_bilan['loss_details']['❌'] += 1
             del pending_predictions[game_number]
-            # Dès qu'une prédiction est terminée, on libère pour la suivante
+            # Libération pour la prédiction suivante
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
 
         return True
+        
     except Exception as e:
-        logger.error(f"Erreur update_status: {e}")
+        logger.error(f"Erreur update_prediction_status: {e}")
         return False
 
 async def check_prediction_result(game_number: int, first_group: str):
     """Vérifie les résultats selon la séquence ✅0️⃣, ✅1️⃣, ✅2️⃣ ou ❌."""
-    # Nettoyage et normalisation du groupe reçu
+    # Normalisation du groupe reçu
     first_group = normalize_suits(first_group)
     
-    # On parcourt TOUTES les prédictions en attente pour voir si l'une d'elles doit être vérifiée maintenant
-    for target_game, pred in list(pending_predictions.items()):
-        # Cas 1 : Prédiction initiale (rattrapage 0) sur le numéro actuel
-        if target_game == game_number and pred.get('rattrapage', 0) == 0:
+    # Vérification pour le jeu N (✅0️⃣)
+    if game_number in pending_predictions:
+        pred = pending_predictions[game_number]
+        # Vérifier que ce n'est pas un rattrapage
+        if pred.get('rattrapage', 0) == 0:
             target_suit = pred['suit']
             if has_suit_in_group(first_group, target_suit):
                 await update_prediction_status(game_number, '✅0️⃣')
                 return
             else:
-                # Échec N, on planifie le rattrapage 1 pour N+1
-                next_target = game_number + 1
-                queue_prediction(next_target, target_suit, pred['base_game'], rattrapage=1, original_game=game_number)
-                logger.info(f"Échec # {game_number}, Rattrapage 1 planifié pour #{next_target}")
-                return # ARRÊT sur cette prédiction pour ce tour
-                
-        # Cas 2 : Rattrapage (rattrapage 1 ou 2) sur le numéro actuel
-        elif target_game == game_number and pred.get('rattrapage', 0) > 0:
-            original_game = pred.get('original_game')
+                # Échec immédiat, initialiser le compteur de vérification
+                pred['check_count'] = 1
+                logger.info(f"Échec # {game_number}, attente vérification N+1")
+    
+    # Vérification pour le jeu N-1 (✅1️⃣)
+    prev_game = game_number - 1
+    if prev_game in pending_predictions:
+        pred = pending_predictions[prev_game]
+        if pred.get('check_count', 0) == 1:
             target_suit = pred['suit']
-            rattrapage_actuel = pred['rattrapage']
-            
             if has_suit_in_group(first_group, target_suit):
-                # Trouvé ! On met à jour le statut du message original
-                if original_game is not None:
-                    await update_prediction_status(original_game, f'✅{rattrapage_actuel}️⃣')
-                # On supprime le rattrapage
-                if target_game in pending_predictions:
-                    del pending_predictions[target_game]
-                return # ARRÊT sur cette prédiction
+                await update_prediction_status(prev_game, '✅1️⃣')
+                return
             else:
-                # Échec du rattrapage actuel
-                if rattrapage_actuel < 2: 
-                    # On planifie le rattrapage suivant (+2)
-                    next_rattrapage = rattrapage_actuel + 1
-                    next_target = game_number + 1
-                    queue_prediction(next_target, target_suit, pred['base_game'], rattrapage=next_rattrapage, original_game=original_game)
-                    logger.info(f"Échec rattrapage {rattrapage_actuel} sur #{game_number}, Rattrapage {next_rattrapage} planifié pour #{next_target}")
-                else:
-                    # Échec final après +2
-                    if original_game is not None:
-                        await update_prediction_status(original_game, '❌')
-                    logger.info(f"Échec final pour la prédiction originale #{original_game} après rattrapage +2")
-                
-                # Dans tous les cas d'échec de rattrapage, on supprime le rattrapage actuel
-                if target_game in pending_predictions:
-                    del pending_predictions[target_game]
-                return # ARRÊT
+                # Deuxième échec, incrémenter le compteur
+                pred['check_count'] = 2
+                logger.info(f"Échec rattrapage 1 sur #{prev_game}, attente vérification N+2")
+    
+    # Vérification pour le jeu N-2 (✅2️⃣ ou ❌)
+    prev2_game = game_number - 2
+    if prev2_game in pending_predictions:
+        pred = pending_predictions[prev2_game]
+        if pred.get('check_count', 0) == 2:
+            target_suit = pred['suit']
+            if has_suit_in_group(first_group, target_suit):
+                await update_prediction_status(prev2_game, '✅2️⃣')
+            else:
+                # Échec définitif après 3 tentatives
+                await update_prediction_status(prev2_game, '❌')
 
 async def process_stats_message(message_text: str):
     """Traite les statistiques du canal 2 pour l'imposition du Système Central."""
@@ -517,7 +510,7 @@ async def process_stats_message(message_text: str):
         logger.info("Système Central (Imposition) : Aucun écart de 6 détecté sur les miroirs.")
 
 async def send_bilan():
-    """Envoie le bilan des prédictions."""
+    """Envoie le bilan des prédictions avec les détails ✅0️⃣, ✅1️⃣, ✅2️⃣, ❌."""
     if stats_bilan['total'] == 0:
         return
 
@@ -529,14 +522,14 @@ async def send_bilan():
         f"✅ Taux de réussite : {win_rate:.1f}%\n"
         f"❌ Taux de perte : {loss_rate:.1f}%\n\n"
         "**Détails :**\n"
-        f"✅0️⃣ : {stats_bilan['win_details']['✅0️⃣']}\n"
-        f"✅1️⃣ : {stats_bilan['win_details']['✅1️⃣']}\n"
-        f"✅2️⃣ : {stats_bilan['win_details']['✅2️⃣']}\n"
-        f"❌ : {stats_bilan['loss_details']['❌']}\n"
+        f"✅0️⃣ (Immédiat) : {stats_bilan['win_details']['✅0️⃣']}\n"
+        f"✅1️⃣ (1 délai) : {stats_bilan['win_details']['✅1️⃣']}\n"
+        f"✅2️⃣ (2 délais) : {stats_bilan['win_details']['✅2️⃣']}\n"
+        f"❌ (Perdu) : {stats_bilan['loss_details']['❌']}\n"
         f"\nTotal prédictions : {stats_bilan['total']}"
     )
     
-    # Envoi du bilan aux utilisateurs actifs en chat privé
+    # Envoi aux utilisateurs actifs
     for user_id_str, user_info in users_data.items():
         try:
             user_id = int(user_id_str)
