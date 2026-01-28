@@ -208,83 +208,6 @@ async def send_prediction_to_user(user_id: int, prediction_msg: str, target_game
         logger.error(f"Erreur envoi prédiction privée à {user_id}: {e}")
 
 
-# --- FONCTIONS DE FORMATAGE DES MESSAGES (NOUVEAU FORMAT) ---
-
-def get_suit_emoji_big(suit: str) -> str:
-    """Retourne un gros emoji pour la couleur."""
-    big_emojis = {
-        '♠': '♠️ 🖤',
-        '♥': '❤️ 🔴',
-        '♦': '♦️ 🔴',
-        '♣': '♣️ 🖤'
-    }
-    return big_emojis.get(suit, suit)
-
-def get_suit_name(suit: str) -> str:
-    """Nom de la couleur."""
-    names = {
-        '♠': 'PIQUE',
-        '♥': 'COEUR', 
-        '♦': 'CARREAU',
-        '♣': 'TRÈFLE'
-    }
-    return names.get(suit, suit)
-
-def generate_prediction_message(target_game: int, predicted_suit: str, status: str = '⏳', is_scp: bool = False) -> str:
-    """Génère un message de prédiction attractif avec le nouveau format."""
-    
-    suit_big = get_suit_emoji_big(predicted_suit)
-    suit_name = get_suit_name(predicted_suit)
-    
-    # Bannières décoratives selon le statut
-    if status == '⏳':
-        banner = "╔══════════════════════╗\n║   🔮 PRÉDICTION 🔮   ║\n╚══════════════════════╝"
-        status_text = "⏳ EN ATTENTE..."
-        sub_text = "La prédiction est en cours de vérification"
-    elif status == '✅0️⃣':
-        banner = "╔══════════════════════╗\n║  🎉 VICTOIRE! 🎉  ║\n╚══════════════════════╝"
-        status_text = "✅0️⃣ GAGNÉ IMMÉDIAT"
-        sub_text = "Trouvé dès le 1er tour! Excellent!"
-    elif status == '✅1️⃣':
-        banner = "╔══════════════════════╗\n║  ✅ VICTOIRE! ✅  ║\n╚══════════════════════╝"
-        status_text = "✅1️⃣ GAGNÉ AU 2ÈME TOUR"
-        sub_text = "Trouvé au tour suivant! Super!"
-    elif status == '✅2️⃣':
-        banner = "╔══════════════════════╗\n║  ✅ VICTOIRE! ✅  ║\n╚══════════════════════╝"
-        status_text = "✅2️⃣ GAGNÉ AU 3ÈME TOUR"
-        sub_text = "Trouvé au dernier moment! Solide!"
-    elif status == '❌':
-        banner = "╔══════════════════════╗\n║  😔 PERDU  😔  ║\n╚══════════════════════╝"
-        status_text = "❌ NON TROUVÉ"
-        sub_text = "Le costume n'est pas sorti..."
-    else:
-        banner = "╔══════════════════════╗\n║   🔮 PRÉDICTION 🔮   ║\n╚══════════════════════╝"
-        status_text = status
-        sub_text = ""
-    
-    scp_badge = "⭐ SYSTÈME CENTRAL ⭐\n" if is_scp else ""
-    
-    now = datetime.now().strftime("%H:%M")
-    
-    msg = f"""
-{banner}
-
-{scp_badge}🎯 **TOUR #{target_game}**
-
-{suit_big}
-**{suit_name}**
-
-📊 **STATUT:** {status_text}
-🕐 {now}
-
-{sub_text}
-
-━━━━━━━━━━━━━━━━━━━━━
-💡 Misez intelligemment
-"""
-    return msg.strip()
-
-
 # --- Fonctions d'Analyse ---
 
 def extract_game_number(message: str):
@@ -353,7 +276,7 @@ def get_predicted_suit(missing_suit: str) -> str:
 
 # --- Logique de Prédiction et File d'Attente ---
 
-async def send_prediction_to_channel(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None, is_scp=False):
+async def send_prediction_to_channel(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None):
     """Envoie la prédiction au canal de prédiction et l'ajoute aux prédictions actives."""
     try:
         # Le bot lance une nouvelle prédiction dès que le canal source arrive sur le numéro prédit.
@@ -378,8 +301,8 @@ async def send_prediction_to_channel(target_game: int, predicted_suit: str, base
             logger.info(f"Rattrapage {rattrapage} actif pour #{target_game} (Original #{original_game})")
             return 0
 
-        # NOUVEAU FORMAT: Utiliser generate_prediction_message au lieu du format simple
-        prediction_msg = generate_prediction_message(target_game, predicted_suit, '⏳', is_scp)
+        # Nouveau format de message plus joli demandé par l'utilisateur
+        prediction_msg = f"🔵{target_game}  🌀 {SUIT_DISPLAY.get(predicted_suit, predicted_suit)} : ⌛"
 
         # Envoi uniquement aux utilisateurs actifs en chat privé (pas de canal de prédiction)
         for user_id_str, user_info in users_data.items():
@@ -403,11 +326,10 @@ async def send_prediction_to_channel(target_game: int, predicted_suit: str, base
             'message_id': 0, 
             'suit': predicted_suit,
             'base_game': base_game,
-            'status': '⏳',
+            'status': '⌛',
             'check_count': 0,
             'rattrapage': 0,
-            'created_at': datetime.now().isoformat(),
-            'is_scp': is_scp  # Stocker si c'est une imposition SCP
+            'created_at': datetime.now().isoformat()
         })
 
         logger.info(f"Prédiction active: Jeu #{target_game} - {predicted_suit}")
@@ -417,7 +339,7 @@ async def send_prediction_to_channel(target_game: int, predicted_suit: str, base
         logger.error(f"Erreur envoi prédiction: {e}")
         return None
 
-def queue_prediction(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None, is_scp=False):
+def queue_prediction(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None):
     """Met une prédiction en file d'attente pour un envoi différé."""
     # Vérification d'unicité
     if target_game in queued_predictions or (target_game in pending_predictions and rattrapage == 0):
@@ -429,8 +351,7 @@ def queue_prediction(target_game: int, predicted_suit: str, base_game: int, ratt
         'base_game': base_game,
         'rattrapage': rattrapage,
         'original_game': original_game,
-        'queued_at': datetime.now().isoformat(),
-        'is_scp': is_scp
+        'queued_at': datetime.now().isoformat()
     }
     logger.info(f"📋 Prédiction #{target_game} mise en file d'attente (Rattrapage {rattrapage})")
     return True
@@ -455,8 +376,7 @@ async def check_and_send_queued_predictions(current_game: int):
                 pred_data['predicted_suit'],
                 pred_data['base_game'],
                 pred_data.get('rattrapage', 0),
-                pred_data.get('original_game'),
-                pred_data.get('is_scp', False)
+                pred_data.get('original_game')
             )
             
             # Si l'envoi a réussi (ou si c'était un rattrapage qui ne crée pas de msg)
@@ -464,19 +384,18 @@ async def check_and_send_queued_predictions(current_game: int):
                 queued_predictions.pop(target_game)
 
 async def update_prediction_status(game_number: int, new_status: str):
-    """Met à jour le message de prédiction dans le canal et les statistiques."""
+    """Met à jour le message de prédiction avec les statuts ✅0️⃣, ✅1️⃣, ✅2️⃣ ou ❌."""
     try:
         if game_number not in pending_predictions:
             return False
 
         pred = pending_predictions[game_number]
         suit = pred['suit']
-        is_scp = pred.get('is_scp', False)  # Récupérer si c'était une imposition SCP
 
-        # NOUVEAU FORMAT: Utiliser generate_prediction_message au lieu du format simple
-        updated_msg = generate_prediction_message(game_number, suit, new_status, is_scp)
+        # Format du message mis à jour avec le statut
+        updated_msg = f"🔵{game_number}  🌀 {SUIT_DISPLAY.get(suit, suit)} : {new_status}"
 
-        # Édition des messages privés au lieu d'en renvoyer
+        # Édition des messages privés
         private_msgs = pred.get('private_messages', {})
         for user_id_str, msg_id in private_msgs.items():
             try:
@@ -489,82 +408,73 @@ async def update_prediction_status(game_number: int, new_status: str):
 
         pred['status'] = new_status
         
-        # Mise à jour des statistiques de bilan
-        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '✅3️⃣']:
+        # Mise à jour des statistiques selon le statut
+        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣']:
             stats_bilan['total'] += 1
             stats_bilan['wins'] += 1
-            stats_bilan['win_details'][new_status if new_status != '✅3️⃣' else '✅2️⃣'] += 1
-            # On ne supprime pas immédiatement si on a des prédictions en attente
+            stats_bilan['win_details'][new_status] += 1
             del pending_predictions[game_number]
-            # Dès qu'une prédiction est terminée, on libère pour la suivante
+            # Libération pour la prédiction suivante
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
+            
         elif new_status == '❌':
             stats_bilan['total'] += 1
             stats_bilan['losses'] += 1
             stats_bilan['loss_details']['❌'] += 1
             del pending_predictions[game_number]
-            # Dès qu'une prédiction est terminée, on libère pour la suivante
+            # Libération pour la prédiction suivante
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
 
         return True
+        
     except Exception as e:
-        logger.error(f"Erreur update_status: {e}")
+        logger.error(f"Erreur update_prediction_status: {e}")
         return False
 
 async def check_prediction_result(game_number: int, first_group: str):
     """Vérifie les résultats selon la séquence ✅0️⃣, ✅1️⃣, ✅2️⃣ ou ❌."""
-    # Nettoyage et normalisation du groupe reçu
+    # Normalisation du groupe reçu
     first_group = normalize_suits(first_group)
     
-    # On parcourt TOUTES les prédictions en attente pour voir si l'une d'elles doit être vérifiée maintenant
-    for target_game, pred in list(pending_predictions.items()):
-        # Cas 1 : Prédiction initiale (rattrapage 0) sur le numéro actuel
-        if target_game == game_number and pred.get('rattrapage', 0) == 0:
+    # Vérification pour le jeu N (✅0️⃣)
+    if game_number in pending_predictions:
+        pred = pending_predictions[game_number]
+        # Vérifier que ce n'est pas un rattrapage
+        if pred.get('rattrapage', 0) == 0:
             target_suit = pred['suit']
             if has_suit_in_group(first_group, target_suit):
                 await update_prediction_status(game_number, '✅0️⃣')
                 return
             else:
-                # Échec N, on planifie le rattrapage 1 pour N+1
-                next_target = game_number + 1
-                is_scp = pred.get('is_scp', False)
-                queue_prediction(next_target, target_suit, pred['base_game'], rattrapage=1, original_game=game_number, is_scp=is_scp)
-                logger.info(f"Échec # {game_number}, Rattrapage 1 planifié pour #{next_target}")
-                return # ARRÊT sur cette prédiction pour ce tour
-                
-        # Cas 2 : Rattrapage (rattrapage 1 ou 2) sur le numéro actuel
-        elif target_game == game_number and pred.get('rattrapage', 0) > 0:
-            original_game = pred.get('original_game')
+                # Échec immédiat, initialiser le compteur de vérification
+                pred['check_count'] = 1
+                logger.info(f"Échec # {game_number}, attente vérification N+1")
+    
+    # Vérification pour le jeu N-1 (✅1️⃣)
+    prev_game = game_number - 1
+    if prev_game in pending_predictions:
+        pred = pending_predictions[prev_game]
+        if pred.get('check_count', 0) == 1:
             target_suit = pred['suit']
-            rattrapage_actuel = pred['rattrapage']
-            
             if has_suit_in_group(first_group, target_suit):
-                # Trouvé ! On met à jour le statut du message original
-                if original_game is not None:
-                    await update_prediction_status(original_game, f'✅{rattrapage_actuel}️⃣')
-                # On supprime le rattrapage
-                if target_game in pending_predictions:
-                    del pending_predictions[target_game]
-                return # ARRÊT sur cette prédiction
+                await update_prediction_status(prev_game, '✅1️⃣')
+                return
             else:
-                # Échec du rattrapage actuel
-                if rattrapage_actuel < 2: 
-                    # On planifie le rattrapage suivant (+2)
-                    next_rattrapage = rattrapage_actuel + 1
-                    next_target = game_number + 1
-                    is_scp = pred.get('is_scp', False)
-                    queue_prediction(next_target, target_suit, pred['base_game'], rattrapage=next_rattrapage, original_game=original_game, is_scp=is_scp)
-                    logger.info(f"Échec rattrapage {rattrapage_actuel} sur #{game_number}, Rattrapage {next_rattrapage} planifié pour #{next_target}")
-                else:
-                    # Échec final après +2
-                    if original_game is not None:
-                        await update_prediction_status(original_game, '❌')
-                    logger.info(f"Échec final pour la prédiction originale #{original_game} après rattrapage +2")
-                
-                # Dans tous les cas d'échec de rattrapage, on supprime le rattrapage actuel
-                if target_game in pending_predictions:
-                    del pending_predictions[target_game]
-                return # ARRÊT
+                # Deuxième échec, incrémenter le compteur
+                pred['check_count'] = 2
+                logger.info(f"Échec rattrapage 1 sur #{prev_game}, attente vérification N+2")
+    
+    # Vérification pour le jeu N-2 (✅2️⃣ ou ❌)
+    prev2_game = game_number - 2
+    if prev2_game in pending_predictions:
+        pred = pending_predictions[prev2_game]
+        if pred.get('check_count', 0) == 2:
+            target_suit = pred['suit']
+            if has_suit_in_group(first_group, target_suit):
+                await update_prediction_status(prev2_game, '✅2️⃣')
+            else:
+                # Échec définitif après 3 tentatives
+                await update_prediction_status(prev2_game, '❌')
 
 async def process_stats_message(message_text: str):
     """Traite les statistiques du canal 2 pour l'imposition du Système Central."""
@@ -600,7 +510,7 @@ async def process_stats_message(message_text: str):
         logger.info("Système Central (Imposition) : Aucun écart de 6 détecté sur les miroirs.")
 
 async def send_bilan():
-    """Envoie le bilan des prédictions."""
+    """Envoie le bilan des prédictions avec les détails ✅0️⃣, ✅1️⃣, ✅2️⃣, ❌."""
     if stats_bilan['total'] == 0:
         return
 
@@ -612,14 +522,14 @@ async def send_bilan():
         f"✅ Taux de réussite : {win_rate:.1f}%\n"
         f"❌ Taux de perte : {loss_rate:.1f}%\n\n"
         "**Détails :**\n"
-        f"✅0️⃣ : {stats_bilan['win_details']['✅0️⃣']}\n"
-        f"✅1️⃣ : {stats_bilan['win_details']['✅1️⃣']}\n"
-        f"✅2️⃣ : {stats_bilan['win_details']['✅2️⃣']}\n"
-        f"❌ : {stats_bilan['loss_details']['❌']}\n"
+        f"✅0️⃣ (Immédiat) : {stats_bilan['win_details']['✅0️⃣']}\n"
+        f"✅1️⃣ (1 délai) : {stats_bilan['win_details']['✅1️⃣']}\n"
+        f"✅2️⃣ (2 délais) : {stats_bilan['win_details']['✅2️⃣']}\n"
+        f"❌ (Perdu) : {stats_bilan['loss_details']['❌']}\n"
         f"\nTotal prédictions : {stats_bilan['total']}"
     )
     
-    # Envoi du bilan aux utilisateurs actifs en chat privé
+    # Envoi aux utilisateurs actifs
     for user_id_str, user_info in users_data.items():
         try:
             user_id = int(user_id_str)
@@ -712,12 +622,10 @@ async def process_prediction_logic(message_text: str, chat_id: int):
     
     # 2. Imposition du Système Central (basé sur les stats du canal 2)
     scp_imposition_suit = None
-    is_scp = False  # NOUVEAU: tracker si c'est une imposition SCP
     if rule2_authorized_suit:
         if scp_cooldown <= 0:
             # Le Système Central a déjà identifié le costume le plus FAIBLE
             scp_imposition_suit = rule2_authorized_suit
-            is_scp = True
             logger.info(f"SCP : Système Central s'impose sur #{next_game}. Cible faible détectée: {scp_imposition_suit}")
         else:
             logger.info(f"SCP : Imposition en pause (Cooldown: {scp_cooldown})")
@@ -764,7 +672,7 @@ async def process_prediction_logic(message_text: str, chat_id: int):
             logger.info("SCP : Règle 1 utilisée, le Système Central pourra s'imposer à nouveau.")
 
     if final_suit:
-        queue_prediction(next_game, final_suit, game_number, is_scp=is_scp)  # NOUVEAU: passer is_scp
+        queue_prediction(next_game, final_suit, game_number)
     else:
         logger.info(f"SCP : Aucune règle applicable pour #{next_game}")
 
@@ -1351,7 +1259,7 @@ async def schedule_daily_reset():
         current_game_number = 0
         last_source_game_number = 0
         
-                # Reset des statistiques de bilan aussi au reset quotidien
+        # Reset des statistiques de bilan aussi au reset quotidien
         stats_bilan = {
             'total': 0,
             'wins': 0,
