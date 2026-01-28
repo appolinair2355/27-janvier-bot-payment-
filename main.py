@@ -1351,10 +1351,80 @@ async def schedule_daily_reset():
         current_game_number = 0
         last_source_game_number = 0
         
-        # Reset des statistiques de bilan aussi au reset quotidien
+                # Reset des statistiques de bilan aussi au reset quotidien
         stats_bilan = {
             'total': 0,
             'wins': 0,
             'losses': 0,
             'win_details': {'✅0️⃣': 0, '✅1️⃣': 0, '✅2️⃣': 0},
-            'loss
+            'loss_details': {'❌': 0}
+        }
+        
+        logger.warning("✅ Toutes les données de prédiction ont été effacées.")
+
+async def start_bot():
+    """Démarre le client Telegram et les vérifications initiales."""
+    global source_channel_ok
+    try:
+        logger.info("Démarrage du bot...")
+        
+        # Tentative de connexion avec retry pour gérer les FloodWait
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    await client.sign_in(bot_token=BOT_TOKEN)
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if "wait of" in err_str:
+                    match = re.search(r"wait of (\d+)", err_str)
+                    wait_seconds = int(match.group(1)) + 5 if match else 30
+                    logger.warning(f"FloodWait détecté: Attente de {wait_seconds} secondes (Essai {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_seconds)
+                else:
+                    raise e
+        
+        source_channel_ok = True
+        logger.info("Bot connecté et prêt pour les chats privés.")
+        return True
+    except Exception as e:
+        logger.error(f"Erreur démarrage du client Telegram: {e}")
+        return False
+
+async def main():
+    """Fonction principale pour lancer le serveur web, le bot et la tâche de reset."""
+    load_users_data()
+    try:
+        await start_web_server()
+
+        success = await start_bot()
+        if not success:
+            logger.error("Échec du démarrage du bot")
+            return
+
+        # Lancement des tâches en arrière-plan
+        asyncio.create_task(schedule_daily_reset())
+        asyncio.create_task(auto_bilan_task())
+        
+        logger.info("Bot complètement opérationnel - En attente de messages...")
+        await client.run_until_disconnected()
+
+    except Exception as e:
+        logger.error(f"Erreur dans main: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        if client and client.is_connected():
+            await client.disconnect()
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot arrêté par l'utilisateur")
+    except Exception as e:
+        logger.error(f"Erreur fatale: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
