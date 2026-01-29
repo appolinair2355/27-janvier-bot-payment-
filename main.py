@@ -51,6 +51,12 @@ TIME_CYCLE = [5, 8, 3, 7, 9, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 
 current_time_cycle_index = 0
 next_prediction_allowed_at = datetime.now()
 
+# Nouvelles variables pour la logique "1 part"
+last_known_source_game = 0      # Dernier numéro vu dans le canal source
+prediction_target_game = None   # Numéro qu'on veut prédire
+waiting_for_one_part = False    # En attente du "1 part"
+cycle_triggered = False         # Le temps cycle est-il arrivé ?
+
 def get_rule1_suit(game_number: int) -> str | None:
     # Cette fonction est maintenant simplifiée car la logique de cycle est gérée dans process_prediction_logic
     if game_number < 6 or game_number > 1436 or game_number % 2 != 0 or game_number % 10 == 0:
@@ -273,6 +279,11 @@ def get_predicted_suit(missing_suit: str) -> str:
     # Assurez-vous que SUIT_MAPPING dans config.py contient :
     # SUIT_MAPPING = {'♠': '♣', '♣': '♠', '♥': '♦', '♦': '♥'}
     return SUIT_MAPPING.get(missing_suit, missing_suit)
+
+# --- Fonction "1 part" ---
+def is_one_part_away(current: int, target: int) -> bool:
+    """Vérifie si current est à 1 part de target (current impair et différence de 1)"""
+    return current % 2 != 0 and target - current == 1
 
 # --- Logique de Prédiction et File d'Attente ---
 
@@ -511,8 +522,13 @@ async def process_stats_message(message_text: str):
 
 async def send_bilan():
     """Envoie le bilan UNIQUEMENT à l'administrateur."""
+    admin_id = 1190237801
+    
     if stats_bilan['total'] == 0:
-        await client.send_message(ADMIN_ID, "📊 Aucune prédiction enregistrée.")
+        try:
+            await client.send_message(admin_id, "📊 Aucune prédiction n'a encore été effectuée.")
+        except Exception as e:
+            logger.error(f"Erreur envoi bilan à l'admin: {e}")
         return
 
     win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
@@ -520,19 +536,24 @@ async def send_bilan():
     
     msg = (
         "📊 **BILAN ADMIN**\n\n"
-        f"✅ Réussite : {win_rate:.1f}%\n"
-        f"❌ Perte : {loss_rate:.1f}%\n\n"
-        f"✅0️⃣ : {stats_bilan['win_details']['✅0️⃣']}\n"
-        f"✅1️⃣ : {stats_bilan['win_details']['✅1️⃣']}\n"
-        f"✅2️⃣ : {stats_bilan['win_details']['✅2️⃣']}\n"
-        f"❌ : {stats_bilan['loss_details']['❌']}\n"
-        f"\nTotal : {stats_bilan['total']}"
+        f"✅ Taux de réussite : {win_rate:.1f}%\n"
+        f"❌ Taux de perte : {loss_rate:.1f}%\n\n"
+        "**Détails :**\n"
+        f"✅0️⃣ (Immédiat) : {stats_bilan['win_details']['✅0️⃣']}\n"
+        f"✅1️⃣ (1 délai) : {stats_bilan['win_details']['✅1️⃣']}\n"
+        f"✅2️⃣ (2 délais) : {stats_bilan['win_details']['✅2️⃣']}\n"
+        f"❌ (Perdu) : {stats_bilan['loss_details']['❌']}\n"
+        f"\nTotal prédictions : {stats_bilan['total']}"
     )
     
-    await client.send_message(ADMIN_ID, msg)
+    # Envoi UNIQUEMENT à l'admin
+    try:
+        await client.send_message(admin_id, msg)
+        logger.info(f"✅ Bilan envoyé à l'admin {admin_id}")
+    except Exception as e:
+        logger.error(f"❌ Erreur envoi bilan à l'admin: {e}")
 
-
-
+# SUPPRIMÉ: auto_bilan_task() n'est plus utilisée (bilan uniquement manuel)
 
 def is_message_finalized(message_text: str) -> bool:
     """Vérifie si le message contient le mot 'Finalisé', 🔰 ou ✅."""
@@ -540,9 +561,118 @@ def is_message_finalized(message_text: str) -> bool:
     # S'il contient ⏰, il n'est pas encore finalisé, on doit attendre.
     return "Finalisé" in message_text or "🔰" in message_text or "✅" in message_text
 
+async def try_launch_prediction():
+    """Tente de lancer la prédiction si la condition '1 part' est remplie."""
+    global waiting_for_one_part, prediction_target_game, cycle_triggered
+    global current_time_cycle_index, next_prediction_allowed_at
+    
+    if not cycle_triggered or prediction_target_game is None:
+        return False
+    
+    # Vérifier la condition "1 part"
+    if is_one_part_away(last_known_source_game, prediction_target_game):
+        logger.info(f"Condition '1 part' OK: {last_known_source_game} → {prediction_target_game}")
+        
+        # Lancer la prédiction
+        success = await execute_prediction(prediction_target_game)
+        
+        if success:
+            # Réinitialiser les flags et passer au cycle suivant
+            waiting_for_one_part = False
+            cycle_triggered = False
+            prediction_target_game = None
+            
+            # Consommer le cycle de temps
+            wait_min = TIME_CYCLE[current_time_cycle_index]
+            next_prediction_allowed_at = datetime.now() + timedelta(minutes=wait_min)
+            current_time_cycle_index = (current_time_cycle_index + 1) % len(TIME_CYCLE)
+            logger.info(f"Cycle consommé. Prochain dans {wait_min} min")
+            return True
+    else:
+        logger.info(f"Attente '1 part': dernier={last_known_source_game}, cible={prediction_target_game}")
+    
+    return False
+
+async def execute_prediction(target_game: int) -> bool:
+    """Exécute la logique de prédiction pour un numéro cible."""
+    global scp_cooldown, already_predicted_games
+    
+    if target_game > 1436:
+        return False
+    
+    # Vérification anti-doublon
+    if target_game in already_predicted_games:
+        logger.info(f"Jeu #{target_game} déjà prédit, ignoré.")
+        return False
+    
+    already_predicted_games.add(target_game)
+    logger.info(f"Numéro #{target_game} marqué comme prédit")
+    
+    # 1. Calcul de la Règle 1
+    rule1_suit = None
+    if target_game >= 6:
+        count_valid = 0
+        for n in range(6, target_game + 1, 2):
+            if n % 10 != 0:
+                count_valid += 1
+        if count_valid > 0:
+            index = (count_valid - 1) % 8
+            rule1_suit = SUIT_CYCLE[index]
+            if target_game == 6:
+                rule1_suit = '♥'
+    
+    # 2. Imposition du Système Central
+    scp_imposition_suit = None
+    if rule2_authorized_suit:
+        if scp_cooldown <= 0:
+            scp_imposition_suit = rule2_authorized_suit
+            logger.info(f"SCP: Cible faible détectée: {scp_imposition_suit}")
+        else:
+            logger.info(f"SCP: Cooldown actif ({scp_cooldown})")
+
+    # Logique de décision
+    final_suit = None
+    if scp_imposition_suit and scp_cooldown <= 0:
+        final_suit = scp_imposition_suit
+        logger.info(f"SCP: Système Central s'impose pour #{target_game} -> {final_suit}")
+        
+        scp_history.append({
+            'game': target_game,
+            'suit': final_suit,
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'reason': "Écart détecté"
+        })
+        if len(scp_history) > 10: scp_history.pop(0)
+        
+        scp_cooldown = 1
+        
+        if final_suit != rule1_suit and ADMIN_ID != 0:
+            try:
+                await client.send_message(ADMIN_ID, f"⚠️ **Imposition SCP**\nLe Système Central impose {SUIT_DISPLAY.get(final_suit, final_suit)} pour #{target_game} (Règle 1 {SUIT_DISPLAY.get(rule1_suit, rule1_suit) if rule1_suit else 'None'} ignorée).")
+            except Exception as e:
+                logger.error(f"Erreur notification imposition: {e}")
+    
+    if not final_suit and rule1_suit:
+        final_suit = rule1_suit
+        logger.info(f"SCP: Règle 1 sélectionnée pour #{target_game} -> {final_suit}")
+        if scp_cooldown > 0:
+            scp_cooldown = 0
+            logger.info("SCP: Cooldown réinitialisé")
+
+    if final_suit:
+        queue_prediction(target_game, final_suit, last_known_source_game)
+        await check_and_send_queued_predictions(last_known_source_game)
+        return True
+    else:
+        logger.info(f"SCP: Aucune règle applicable pour #{target_game}")
+        return False
+
 async def process_prediction_logic(message_text: str, chat_id: int):
-    """Lance la prédiction selon le cycle de temps."""
-    global last_source_game_number, current_game_number, scp_cooldown, current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
+    """Gère le déclenchement du cycle de temps et la mise en attente du '1 part'."""
+    global last_source_game_number, current_game_number, scp_cooldown
+    global current_time_cycle_index, next_prediction_allowed_at
+    global cycle_triggered, waiting_for_one_part, prediction_target_game, last_known_source_game
+    
     if chat_id != SOURCE_CHANNEL_ID:
         return
         
@@ -550,111 +680,39 @@ async def process_prediction_logic(message_text: str, chat_id: int):
     if game_number is None:
         return
 
+    # Mettre à jour le dernier numéro connu du canal source
+    last_known_source_game = game_number
+    logger.info(f"Dernier numéro source mis à jour: #{game_number}")
+    
+    # Si on est en attente d'un "1 part", vérifier si c'est maintenant possible
+    if waiting_for_one_part and cycle_triggered:
+        success = await try_launch_prediction()
+        if success:
+            return
+    
+    # Vérifier si le temps cycle est arrivé
     now = datetime.now()
     if now < next_prediction_allowed_at:
         return
-
-    logger.info(f"Cycle de temps : Déclenchement prédiction à {now.strftime('%H:%M:%S')}")
     
-    # Mise à jour du prochain créneau
-    wait_min = TIME_CYCLE[current_time_cycle_index]
-    next_prediction_allowed_at = now + timedelta(minutes=wait_min)
-    current_time_cycle_index = (current_time_cycle_index + 1) % len(TIME_CYCLE)
-    logger.info(f"Prochaine prédiction autorisée après {wait_min} min (à {next_prediction_allowed_at.strftime('%H:%M:%S')})")
-        
-    logger.info(f"Analyse SCP pour le message reçu (Jeu #{game_number})")
+    # Le temps cycle est arrivé !
+    logger.info(f"Temps cycle arrivé à {now.strftime('%H:%M:%S')}")
+    cycle_triggered = True
     
-    # On prédit N+2 : si le canal source est sur 10, on lance le numéro 12
+    # Calculer la cible (N+2 valide)
     candidate = game_number + 2
     while candidate % 2 != 0 or candidate % 10 == 0:
         candidate += 1
-    next_game = candidate
-
-    if next_game > 1436:
-        return
     
-    # Vérification anti-doublon : ne pas prédire le même numéro deux fois
-    if next_game in already_predicted_games:
-        logger.info(f"Jeu #{next_game} déjà prédit, ignoré pour éviter doublon.")
-        return
+    prediction_target_game = candidate
+    logger.info(f"Cible calculée: #{prediction_target_game}")
     
-    # Marquer ce numéro comme prédit
-    already_predicted_games.add(next_game)
-    logger.info(f"Numéro #{next_game} marqué comme prédit (évite doublon)")
+    # Essayer de lancer immédiatement si condition "1 part" déjà remplie
+    success = await try_launch_prediction()
     
-    # 1. Calcul de la Règle 1
-    # On utilise le cycle direct car la normalisation est gérée ici par l'attente du #4
-    rule1_suit = None
-    if next_game:
-        count_valid = 0
-        for n in range(6, next_game + 1, 2):
-            if n % 10 != 0:
-                count_valid += 1
-        if count_valid > 0:
-            index = (count_valid - 1) % 8
-            rule1_suit = SUIT_CYCLE[index]
-            # Forçage spécifique pour le jeu #6 si demandé
-            if next_game == 6:
-                rule1_suit = '♥'
-    
-    # 2. Imposition du Système Central (basé sur les stats du canal 2)
-    scp_imposition_suit = None
-    if rule2_authorized_suit:
-        if scp_cooldown <= 0:
-            # Le Système Central a déjà identifié le costume le plus FAIBLE
-            scp_imposition_suit = rule2_authorized_suit
-            logger.info(f"SCP : Système Central s'impose sur #{next_game}. Cible faible détectée: {scp_imposition_suit}")
-        else:
-            logger.info(f"SCP : Imposition en pause (Cooldown: {scp_cooldown})")
-
-    # Logique de décision
-    final_suit = None
-    if scp_imposition_suit:
-        # Le Système Central s'impose s'il y a un écart de 6 entre miroirs
-        # On vérifie si on a déjà fait une prédiction règle 1 depuis la dernière imposition
-        if scp_cooldown <= 0:
-            final_suit = scp_imposition_suit
-            logger.info(f"SCP : Système Central s'impose pour #{next_game} -> {final_suit}")
-            
-            # Enregistrement dans l'historique
-            scp_history.append({
-                'game': next_game,
-                'suit': final_suit,
-                'time': datetime.now().strftime('%H:%M:%S'),
-                'reason': "Écart détecté"
-            })
-            if len(scp_history) > 10: scp_history.pop(0)
-
-            # On active le cooldown : le Système Central doit attendre que la Règle 1 soit utilisée
-            scp_cooldown = 1
-            
-            # Comparaison avec la règle 1 pour la notification
-            if final_suit == rule1_suit:
-                logger.info(f"SCP : L'imposition confirme la Règle 1 ({final_suit}). Pas de notification admin.")
-            elif ADMIN_ID != 0 and final_suit:
-                try:
-                    await client.send_message(ADMIN_ID, f"⚠️ **Imposition SCP**\nLe Système Central impose le costume {SUIT_DISPLAY.get(final_suit, final_suit)} pour le jeu #{next_game} (Règle 1 {SUIT_DISPLAY.get(rule1_suit, rule1_suit) if rule1_suit else 'None'} ignorée).")
-                except Exception as e:
-                    logger.error(f"Erreur notification imposition: {e}")
-        else:
-            logger.info(f"SCP : Système Central a déjà imposé récemment. Attente d'une prédiction Règle 1.")
-    
-    # Règle 1 seulement si le Système Central ne s'est PAS imposé pour cette prédiction
-    if not final_suit and rule1_suit:
-        final_suit = rule1_suit
-        logger.info(f"SCP : Règle 1 sélectionnée pour #{next_game} -> {final_suit}")
-        # Une fois la Règle 1 utilisée, on réinitialise le cooldown pour permettre une future imposition
-        if scp_cooldown > 0:
-            scp_cooldown = 0
-            logger.info("SCP : Règle 1 utilisée, le Système Central pourra s'imposer à nouveau.")
-
-    if final_suit:
-        queue_prediction(next_game, final_suit, game_number)
-    else:
-        logger.info(f"SCP : Aucune règle applicable pour #{next_game}")
-
-    # Envoi immédiat si possible
-    await check_and_send_queued_predictions(game_number)
+    if not success:
+        waiting_for_one_part = True
+        logger.info(f"Mise en attente '1 part' pour #{prediction_target_game}")
 
 async def process_finalized_message(message_text: str, chat_id: int):
     """Traite uniquement la vérification des résultats quand le message est finalisé."""
@@ -696,7 +754,7 @@ async def handle_message(event):
             
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            # Prédiction immédiate sans attendre finalisation
+            # Prédiction avec gestion du "1 part"
             await process_prediction_logic(message_text, chat_id)
             
             # Commande /info pour l'admin
@@ -708,7 +766,10 @@ async def handle_message(event):
                     "ℹ️ **ÉTAT DU SYSTÈME**\n\n"
                     f"🎮 Jeu actuel: #{current_game_number}\n"
                     f"🔮 Prédictions actives: {active_preds}\n"
-                    f"⏳ Cooldown SCP: {'Actif' if scp_cooldown > 0 else 'Prêt'}\n\n"
+                    f"⏳ Cooldown SCP: {'Actif' if scp_cooldown > 0 else 'Prêt'}\n"
+                    f"⏱️ Cycle en attente: {'Oui' if waiting_for_one_part else 'Non'}\n"
+                    f"🎯 Cible en attente: #{prediction_target_game if prediction_target_game else 'Aucune'}\n"
+                    f"📍 Dernier source: #{last_known_source_game}\n\n"
                     "📌 **DERNIÈRES IMPOSITIONS SCP :**\n"
                     f"{history_text}\n\n"
                     "📈 Le bot suit le cycle de la Règle 1 par défaut."
@@ -1006,7 +1067,7 @@ async def cmd_bilan(event):
     admin_id = 1190237801
     if event.sender_id != admin_id: return
     await send_bilan()
-    await event.respond("✅ Bilan manuel envoyé au canal.")
+    await event.respond("✅ Bilan manuel envoyé à l'admin.")
 
 @client.on(events.NewMessage(pattern=r'^/a (\d+)$'))
 async def cmd_set_a_shortcut(event):
@@ -1045,7 +1106,10 @@ async def cmd_info(event):
         "ℹ️ **ÉTAT DU SYSTÈME**\n\n"
         f"🎮 Jeu actuel: #{current_game_number}\n"
         f"🔮 Prédictions actives: {active_preds}\n"
-        f"⏳ Cooldown SCP: {'Actif' if scp_cooldown > 0 else 'Prêt'}\n\n"
+        f"⏳ Cooldown SCP: {'Actif' if scp_cooldown > 0 else 'Prêt'}\n"
+        f"⏱️ Cycle en attente: {'Oui' if waiting_for_one_part else 'Non'}\n"
+        f"🎯 Cible en attente: #{prediction_target_game if prediction_target_game else 'Aucune'}\n"
+        f"📍 Dernier source: #{last_known_source_game}\n\n"
         "📌 **DERNIÈRES IMPOSITIONS SCP :**\n"
         f"{history_text}\n\n"
         "📈 Le bot suit le cycle de la Règle 1 par défaut."
@@ -1060,7 +1124,10 @@ async def cmd_status(event):
         return
 
     status_msg = f"📊 **État du Bot:**\n\n"
-    status_msg += f"🎮 Jeu actuel (Source 1): #{current_game_number}\n\n"
+    status_msg += f"🎮 Jeu actuel (Source 1): #{current_game_number}\n"
+    status_msg += f"📍 Dernier connu source: #{last_known_source_game}\n"
+    status_msg += f"⏱️ Cycle en attente: {'Oui' if waiting_for_one_part else 'Non'}\n"
+    status_msg += f"🎯 Cible: #{prediction_target_game if prediction_target_game else 'Aucune'}\n\n"
     
     if pending_predictions:
         status_msg += f"**🔮 Actives ({len(pending_predictions)}):**\n"
@@ -1080,7 +1147,10 @@ async def cmd_reset_all(event):
         await event.respond("❌ Commande réservée à l'administrateur principal.")
         return
     
-    global users_data, pending_predictions, queued_predictions, processed_messages, current_game_number, last_source_game_number, stats_bilan, current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
+    global users_data, pending_predictions, queued_predictions, processed_messages
+    global current_game_number, last_source_game_number, stats_bilan
+    global current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
+    global last_known_source_game, prediction_target_game, waiting_for_one_part, cycle_triggered
     
     # Réinitialisation des données utilisateurs (efface tous les IDs et abonnements)
     users_data = {}
@@ -1093,6 +1163,10 @@ async def cmd_reset_all(event):
     already_predicted_games.clear()
     current_game_number = 0
     last_source_game_number = 0
+    last_known_source_game = 0
+    prediction_target_game = None
+    waiting_for_one_part = False
+    cycle_triggered = False
     current_time_cycle_index = 0
     next_prediction_allowed_at = datetime.now()
     stats_bilan = {
@@ -1189,7 +1263,7 @@ async def cmd_payer(event):
 # --- Serveur Web et Démarrage ---
 
 async def index(request):
-    html = f"""<!DOCTYPE html><html><head><title>Bot Prédiction Baccarat</title></head><body><h1>🎯 Bot de Prédiction Baccarat</h1><p>Le bot est en ligne et surveille les canaux.</p><p><strong>Jeu actuel:</strong> #{current_game_number}</p></body></html>"""
+    html = f"""<!DOCTYPE html><html><head><title>Bot Prédiction Baccarat</title></head><body><h1>🎯 Bot de Prédiction Baccarat</h1><p>Le bot est en ligne et surveille les canaux.</p><p><strong>Jeu actuel:</strong> #{current_game_number}</p><p><strong>Dernier source:</strong> #{last_known_source_game}</p><p><strong>Cycle en attente:</strong> {'Oui' if waiting_for_one_part else 'Non'}</p></body></html>"""
     return web.Response(text=html, content_type='text/html', status=200)
 
 async def health_check(request):
@@ -1226,7 +1300,11 @@ async def schedule_daily_reset():
 
         logger.warning("🚨 RESET QUOTIDIEN À 00h59 WAT DÉCLENCHÉ!")
         
-        global pending_predictions, queued_predictions, processed_messages, last_transferred_game, current_game_number, last_source_game_number, stats_bilan, already_predicted_games
+        global pending_predictions, queued_predictions, processed_messages
+        global last_transferred_game, current_game_number, last_source_game_number
+        global stats_bilan, already_predicted_games
+        global last_known_source_game, prediction_target_game, waiting_for_one_part, cycle_triggered
+        global current_time_cycle_index, next_prediction_allowed_at
         
         pending_predictions.clear()
         queued_predictions.clear()
@@ -1235,6 +1313,12 @@ async def schedule_daily_reset():
         last_transferred_game = None
         current_game_number = 0
         last_source_game_number = 0
+        last_known_source_game = 0
+        prediction_target_game = None
+        waiting_for_one_part = False
+        cycle_triggered = False
+        current_time_cycle_index = 0
+        next_prediction_allowed_at = datetime.now()
         
         # Reset des statistiques de bilan aussi au reset quotidien
         stats_bilan = {
@@ -1291,7 +1375,7 @@ async def main():
 
         # Lancement des tâches en arrière-plan
         asyncio.create_task(schedule_daily_reset())
-        asyncio.create_task(auto_bilan_task())
+        # SUPPRIMÉ: asyncio.create_task(auto_bilan_task()) - Bilan uniquement manuel
         
         logger.info("Bot complètement opérationnel - En attente de messages...")
         await client.run_until_disconnected()
