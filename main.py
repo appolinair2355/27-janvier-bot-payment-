@@ -1,4 +1,4 @@
-Import os
+import os
 import asyncio
 import re
 import logging
@@ -47,7 +47,7 @@ client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 # Variables Globales d'État
 SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
-TIME_CYCLE = [5, 7, 10, 6]
+TIME_CYCLE = [2, 4, 7, 5]
 current_time_cycle_index = 0
 next_prediction_allowed_at = datetime.now()
 
