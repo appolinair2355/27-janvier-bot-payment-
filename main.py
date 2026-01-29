@@ -47,7 +47,7 @@ client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 # Variables Globales d'État
 SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
-TIME_CYCLE = [2, 4, 7, 5]
+TIME_CYCLE = [5, 8, 3, 7, 9, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 5]
 current_time_cycle_index = 0
 next_prediction_allowed_at = datetime.now()
 
@@ -510,52 +510,29 @@ async def process_stats_message(message_text: str):
         logger.info("Système Central (Imposition) : Aucun écart de 6 détecté sur les miroirs.")
 
 async def send_bilan():
-    """Envoie le bilan des prédictions avec les détails ✅0️⃣, ✅1️⃣, ✅2️⃣, ❌."""
+    """Envoie le bilan UNIQUEMENT à l'administrateur."""
     if stats_bilan['total'] == 0:
+        await client.send_message(ADMIN_ID, "📊 Aucune prédiction enregistrée.")
         return
 
-    win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100
-    loss_rate = (stats_bilan['losses'] / stats_bilan['total']) * 100
+    win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
+    loss_rate = (stats_bilan['losses'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
     
     msg = (
-        "📊 **BILAN DES PRÉDICTIONS**\n\n"
-        f"✅ Taux de réussite : {win_rate:.1f}%\n"
-        f"❌ Taux de perte : {loss_rate:.1f}%\n\n"
-        "**Détails :**\n"
-        f"✅0️⃣ (Immédiat) : {stats_bilan['win_details']['✅0️⃣']}\n"
-        f"✅1️⃣ (1 délai) : {stats_bilan['win_details']['✅1️⃣']}\n"
-        f"✅2️⃣ (2 délais) : {stats_bilan['win_details']['✅2️⃣']}\n"
-        f"❌ (Perdu) : {stats_bilan['loss_details']['❌']}\n"
-        f"\nTotal prédictions : {stats_bilan['total']}"
+        "📊 **BILAN ADMIN**\n\n"
+        f"✅ Réussite : {win_rate:.1f}%\n"
+        f"❌ Perte : {loss_rate:.1f}%\n\n"
+        f"✅0️⃣ : {stats_bilan['win_details']['✅0️⃣']}\n"
+        f"✅1️⃣ : {stats_bilan['win_details']['✅1️⃣']}\n"
+        f"✅2️⃣ : {stats_bilan['win_details']['✅2️⃣']}\n"
+        f"❌ : {stats_bilan['loss_details']['❌']}\n"
+        f"\nTotal : {stats_bilan['total']}"
     )
     
-    # Envoi aux utilisateurs actifs
-    for user_id_str, user_info in users_data.items():
-        try:
-            user_id = int(user_id_str)
-            if can_receive_predictions(user_id):
-                await client.send_message(user_id, msg)
-                logger.info(f"✅ Bilan envoyé à {user_id}")
-        except Exception as e:
-            logger.error(f"❌ Erreur envoi bilan à {user_id_str}: {e}")
+    await client.send_message(ADMIN_ID, msg)
 
-async def auto_bilan_task():
-    """Tâche périodique pour envoyer le bilan."""
-    global last_bilan_time
-    logger.info(f"Démarrage de la tâche auto_bilan (Intervalle: {bilan_interval} minutes)")
-    while True:
-        try:
-            await asyncio.sleep(60) # Vérifie chaque minute
-            now = datetime.now()
-            next_bilan_time = last_bilan_time + timedelta(minutes=bilan_interval)
-            
-            if now >= next_bilan_time:
-                logger.info("Déclenchement automatique du bilan...")
-                await send_bilan()
-                last_bilan_time = now
-        except Exception as e:
-            logger.error(f"Erreur dans auto_bilan_task: {e}")
-            await asyncio.sleep(10)
+
+
 
 def is_message_finalized(message_text: str) -> bool:
     """Vérifie si le message contient le mot 'Finalisé', 🔰 ou ✅."""
