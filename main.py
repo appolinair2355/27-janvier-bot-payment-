@@ -47,7 +47,7 @@ client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 # Variables Globales d'État
 SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
-TIME_CYCLE = [4, 5, 7, 6]
+TIME_CYCLE = [5, 7, 10, 6]
 current_time_cycle_index = 0
 next_prediction_allowed_at = datetime.now()
 
