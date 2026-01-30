@@ -1085,33 +1085,7 @@ Les meilleures opportunités arrivent sans prévenir!
                 "🔔 **NOUVELLE DEMANDE D'ABONNEMENT**\n\n"
                 f"👤 **Utilisateur:** {user_info.get('nom')} {user_info.get('prenom')}\n"
                 f"🆔 **ID:** `{user_id}`\n"
-                f"💰 **Montant:** {amount} FCFA\n"
-                f"📅 **Durée:** {dur_text}\n"
-                f"📍 **Pays:** {user_info.get('pays')}\n\n"
-                "Vérifier le paiement et valider."
-            )
-            
-            buttons = [
-                [Button.inline(f"✅ Valider {dur_text}", data=f"valider_{user_id}_{dur_code}")],
-                [Button.inline("❌ Rejeter", data=f"rejeter_{user_id}")]
-            ]
-            
-            try:
-                await client.send_message(admin_id, msg_admin, buttons=buttons)
-            except Exception as e:
-                logger.error(f"Erreur notification admin: {e}")
 
-            await event.respond("""✅ **DEMANDE ENVOYÉE!**
-
-⏳ Notre équipe vérifie votre paiement...
-🚀 Votre accès sera activé sous 5 minutes maximum!
-
-📱 Vous recevrez une confirmation ici même.
-
-💎 **Préparez-vous à gagner!**""")
-        else:
-            await event.respond("❌ Montant invalide. Répondez avec `200`, `1000` ou `2000`.")
-        return
 
 @client.on(events.CallbackQuery(data=re.compile(b'valider_(\d+)_(.*)')))
 async def handle_validation(event):
@@ -1140,7 +1114,152 @@ async def handle_validation(event):
     })
     
     try:
-        activation_msg = f"""🎉 **FÉLICITATIONS! VOTRE ACCÈS EST ACTIVÉ!** 🎉
+        @client.on(events.NewMessage())
+async def handle_registration_and_payment(event):
+    if event.is_group or event.is_channel: 
+        return
+    
+    # Ignorer les commandes
+    if event.message.message and event.message.message.startswith('/'): 
+        return
+    
+    user_id = event.sender_id
+    user = get_user(user_id)
+    
+    # Vérifier si on est en mode inscription
+    if user_id in user_conversation_state:
+        state = user_conversation_state[user_id]
+        message_text = event.message.message.strip()
+        
+        if state == 'awaiting_nom':
+            if not message_text:
+                await event.respond("❌ Veuillez entrer un nom valide.")
+                return
+                
+            update_user(user_id, {'nom': message_text})
+            user_conversation_state[user_id] = 'awaiting_prenom'
+            await event.respond(f"""✅ **Nom enregistré: {message_text}**
+
+📝 **Étape 2/3: Votre prénom?**""")
+            return
+        
+        elif state == 'awaiting_prenom':
+            if not message_text:
+                await event.respond("❌ Veuillez entrer un prénom valide.")
+                return
+                
+            update_user(user_id, {'prenom': message_text})
+            user_conversation_state[user_id] = 'awaiting_pays'
+            await event.respond(f"""✅ **Enchanté {message_text}!**
+
+🌍 **Étape 3/3: Votre pays?**""")
+            return
+        
+        elif state == 'awaiting_pays':
+            if not message_text:
+                await event.respond("❌ Veuillez entrer un pays valide.")
+                return
+            
+            # Finaliser l'inscription
+            update_user(user_id, {
+                'pays': message_text,
+                'registered': True,
+                'trial_started': datetime.now().isoformat(),
+                'trial_used': False
+            })
+            del user_conversation_state[user_id]
+            
+            # Message de confirmation
+            success_msg = f"""🎉 **FÉLICITATIONS {message_text.upper()}!** 🎉
+
+✅ Votre compte est ACTIVÉ!
+⏰ **60 MINUTES D'ESSAI GRATUIT** démarrées!
+
+🚀 **Comment ça marche?**
+1️⃣ Je surveille les canaux sources en temps réel
+2️⃣ Mes algorithmes détectent les patterns gagnants
+3️⃣ Vous recevez les prédictions INSTANTANÉMENT ici
+4️⃣ Les résultats se mettent à jour automatiquement
+
+💎 **Ce que vous allez recevoir:**
+• 🎯 Prédictions précises avec couleur à jouer
+• ⚡ Alertes en temps réel
+• 📊 Mises à jour automatiques des résultats
+• 🔥 Accès aux 2 algorithmes (Stats + Cycle)
+
+⚠️ **IMPORTANT:** Restez dans ce chat, ne fermez pas Telegram!
+Les meilleures opportunités arrivent sans prévenir!
+
+🍀 **Bonne chance et bienvenue dans l'élite!**"""
+            
+            await event.respond(success_msg)
+            logger.info(f"✅ Nouvel utilisateur inscrit: {user_id} - {user.get('nom')} {message_text}")
+            return
+    
+    # Gestion des paiements (hors inscription)
+    if user.get('awaiting_screenshot') and event.message.photo:
+        update_user(user_id, {'awaiting_screenshot': False, 'awaiting_amount': True})
+        await event.respond("""📸 **Paiement reçu!**
+
+💰 **Dernière étape:** Indiquez le montant payé:
+• `200` pour 24H
+• `1000` pour 1 semaine  
+• `2000` pour 2 semaines
+
+⏳ Validation sous 5 minutes par notre équipe.""")
+        return
+    
+    if user.get('awaiting_amount'):
+        message_text = event.message.message.strip()
+        if message_text in ['200', '1000', '2000']:
+            amount = message_text
+            update_user(user_id, {'awaiting_amount': False})
+            
+            admin_id = 1190237801
+            user_info = get_user(user_id)
+            
+            if amount == '200':
+                dur_text = "24 heures"
+                dur_code = "1d"
+            elif amount == '1000':
+                dur_text = "1 semaine"
+                dur_code = "1w"
+            else:
+                dur_text = "2 semaines"
+                dur_code = "2w"
+
+            msg_admin = (
+                "🔔 **NOUVELLE DEMANDE D'ABONNEMENT**\n\n"
+                f"👤 **Utilisateur:** {user_info.get('nom')} {user_info.get('prenom')}\n"
+                f"🆔 **ID:** `{user_id}`\n"
+                f"💰 **Montant:** {amount} FCFA\n"
+                f"📅 **Durée:** {dur_text}\n"
+                f"📍 **Pays:** {user_info.get('pays')}\n\n"
+                "Vérifier le paiement et valider."
+            )
+            
+            buttons = [
+                [Button.inline(f"✅ Valider {dur_text}", data=f"valider_{user_id}_{dur_code}")],
+                [Button.inline("❌ Rejeter", data=f"rejeter_{user_id}")]
+            ]
+            
+            try:
+                await client.send_message(admin_id, msg_admin, buttons=buttons)
+            except Exception as e:
+                logger.error(f"Erreur notification admin: {e}")
+
+            await event.respond("""✅ **DEMANDE ENVOYÉE!**
+
+⏳ Notre équipe vérifie votre paiement...
+🚀 Votre accès sera activé sous 5 minutes maximum!
+
+📱 Vous recevrez une confirmation ici même.
+
+💎 **Préparez-vous à gagner!**""")
+        else:
+            await event.respond("❌ Montant invalide. Répondez avec `200`, `1000` ou `2000`.")
+        return
+activation_msg = f"""🎉 **FÉLICITATIONS! VOTRE ACCÈS EST ACTIVÉ!** 🎉
 
 ✅ Abonnement **{days} jour(s)** confirmé!
 🔥 Vous faites maintenant partie de l'ELITE!
