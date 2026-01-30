@@ -18,6 +18,10 @@ PAYMENT_LINK = "https://my.moneyfusion.net/6977f7502181d4ebf722398d"
 PAYMENT_LINK_24H = "https://my.moneyfusion.net/6977f7502181d4ebf722398d"
 USERS_FILE = "users_data.json"
 
+# Configuration pour l'administrateur
+ADMIN_NAME = "Sossou Kouamé"
+ADMIN_TITLE = "Administrateur et développeur de ce Bot"
+
 # --- Configuration et Initialisation ---
 logging.basicConfig(
     level=logging.INFO,
@@ -96,6 +100,9 @@ transfer_enabled = True
 users_data = {}
 user_conversation_state = {}
 
+# État pour la commande /users (envoi de message personnalisé)
+admin_message_state = {}  # {admin_id: {'target_user_id': int, 'step': 'awaiting_message'}}
+
 def load_users_data():
     global users_data
     try:
@@ -141,8 +148,7 @@ def update_user(user_id: int, data: dict):
     save_users_data()
 
 def is_user_subscribed(user_id: int) -> bool:
-    admin_id = 1190237801
-    if user_id == admin_id:
+    if user_id == ADMIN_ID:
         return True
     user = get_user(user_id)
     if not user.get('subscription_end'):
@@ -160,7 +166,7 @@ def is_trial_active(user_id: int) -> bool:
         return False
     try:
         trial_start = datetime.fromisoformat(user['trial_started'])
-        trial_end = trial_start + timedelta(minutes=60)  # ← 60 MINUTES D'ESSAI
+        trial_end = trial_start + timedelta(minutes=60)  # 60 MINUTES D'ESSAI
         return datetime.now() < trial_end
     except:
         return False
@@ -174,6 +180,17 @@ def can_receive_predictions(user_id: int) -> bool:
 def get_subscription_type(user_id: int) -> str:
     user = get_user(user_id)
     return user.get('subscription_type', None)
+
+def get_user_status(user_id: int) -> str:
+    """Retourne le statut d'abonnement d'un utilisateur."""
+    if is_user_subscribed(user_id):
+        return "✅ Abonné"
+    elif is_trial_active(user_id):
+        return "🎁 Essai actif"
+    elif get_user(user_id).get('trial_used'):
+        return "⏰ Essai terminé"
+    else:
+        return "❌ Non inscrit"
 
 # ============================================================
 # ENVOI DES PRÉDICTIONS AUX UTILISATEURS
@@ -189,14 +206,13 @@ async def send_prediction_to_all_users(prediction_msg: str, target_game: int, ru
     failed_count = 0
     
     # Envoyer à l'admin aussi
-    admin_id = 1190237801
     try:
-        admin_msg = await client.send_message(admin_id, prediction_msg)
-        private_messages[str(admin_id)] = admin_msg.id
-        logger.info(f"✅ Prédiction envoyée à l'admin {admin_id}")
+        admin_msg = await client.send_message(ADMIN_ID, prediction_msg)
+        private_messages[str(ADMIN_ID)] = admin_msg.id
+        logger.info(f"✅ Prédiction envoyée à l'admin {ADMIN_ID}")
         sent_count += 1
     except Exception as e:
-        logger.error(f"❌ Erreur envoi à l'admin {admin_id}: {e}")
+        logger.error(f"❌ Erreur envoi à l'admin {ADMIN_ID}: {e}")
         failed_count += 1
     
     # Envoyer à tous les utilisateurs enregistrés
@@ -227,8 +243,6 @@ async def edit_prediction_for_all_users(game_number: int, new_status: str, suit:
     display_game = original_game if original_game else game_number
     
     # Format du message mis à jour selon le statut
-    status_emoji = "✅" if "✅" in new_status else "❌"
-    
     if rule_type == "R2":
         if new_status == "❌":
             status_text = "❌ PERDU"
@@ -891,49 +905,32 @@ client.add_event_handler(handle_edited_message, events.MessageEdited())
 
 @client.on(events.NewMessage(pattern='/start'))
 async def cmd_start(event):
-    if event.is_group or event.is_channel: return
+    if event.is_group or event.is_channel: 
+        return
     
     user_id = event.sender_id
     user = get_user(user_id)
-    admin_id = 1190237801
     
-    # Message de bienvenue séduisant pour nouveaux utilisateurs
-    if not user.get('registered'):
-        welcome_msg = """🎰 **BIENVENUE DANS L'ELITE DES GAGNANTS!** 🎰
-
-💎 Vous venez de découvrir le bot de prédiction Baccarat le plus avancé du marché!
-
-🚀 **Ce qui vous attend:**
-• Prédictions basées sur des algorithmes statistiques de pointe
-• Analyse en temps réel des patterns gagnants
-• Taux de réussite optimisé par IA
-• 60 MINUTES D'ESSAI GRATUIT pour tester la puissance du système!
-
-💰 **Nos utilisateurs gagnants** profitent déjà d'un avantage statistique significatif.
-
-👇 **Commencez votre inscription maintenant!**"""
-        await event.respond(welcome_msg)
-        return
-    
-    # Utilisateur déjà inscrit
+    # Vérifier si déjà inscrit et actif
     if user.get('registered'):
-        if is_user_subscribed(user_id) or user_id == admin_id:
-            sub_type = "VIP 🔥" if get_subscription_type(user_id) == 'premium' or user_id == admin_id else "Standard"
-            sub_end = user.get('subscription_end', 'Illimité' if user_id == admin_id else 'N/A')
+        if is_user_subscribed(user_id) or user_id == ADMIN_ID:
+            sub_type = "VIP 🔥" if get_subscription_type(user_id) == 'premium' or user_id == ADMIN_ID else "Standard"
+            sub_end = user.get('subscription_end', 'Illimité' if user_id == ADMIN_ID else 'N/A')
             update_user(user_id, {'expiry_notified': False})
             
             active_msg = f"""🎯 **BON RETOUR {user.get('prenom', 'CHAMPION').upper()}!** 🎯
 
 ✅ Votre accès **{sub_type}** est ACTIF!
-📅 Expiration: {sub_end[:10] if sub_end and user_id != admin_id else sub_end}
+📅 Expiration: {sub_end[:10] if sub_end and user_id != ADMIN_ID else sub_end}
 
 🔥 **Vous êtes prêt à gagner!**
-Les prédictions arrivent automatiquement ici dès qu'une opportunité se présente.
+Les prédictions arrivent automatiquement ici.
 
-💡 **Conseil pro:** Restez attentif aux notifications, les meilleures opportunités partent vite!
+💡 **Conseil pro:** Restez attentif aux notifications!
 
 🚀 **Bonne chance et gros gains!**"""
             await event.respond(active_msg)
+            return
             
         elif is_trial_active(user_id):
             trial_start = datetime.fromisoformat(user['trial_started'])
@@ -944,15 +941,11 @@ Les prédictions arrivent automatiquement ici dès qu'une opportunité se prése
 
 🎁 Il vous reste **{remaining} minutes** de test gratuit!
 
-🔥 Profitez-en pour découvrir la puissance de nos algorithmes:
-• Prédictions en temps réel
-• Mises à jour automatiques des résultats
-• Analyse statistique avancée
-
-💎 **Astuce:** Plus vous observez, plus vous comprenez la puissance du système!
+🔥 Profitez-en pour découvrir la puissance de nos algorithmes!
 
 ⚡ **Ne perdez pas une seule seconde, restez attentif!**"""
             await event.respond(trial_msg)
+            return
             
         else:
             # Essai terminé - message de conversion
@@ -974,147 +967,33 @@ Les prédictions arrivent automatiquement ici dès qu'une opportunité se prése
 💎 **1000 FCFA** = 1 semaine complète  
 💎 **2000 FCFA** = 2 semaines VIP
 
-📊 **Pourquoi s'abonner?**
-• Accès illimité aux prédictions gagnantes
-• Algorithmes mis à jour en continu
-• Support prioritaire
-• Gains potentiels exponentiels!
-
 👇 **CHOISISSEZ VOTRE FORMULE ET REJOIGNEZ LES GAGNANTS!**"""
             
             await event.respond(expired_msg, buttons=buttons)
+            return
+    
+    # NOUVEL UTILISATEUR - Démarrer l'inscription
+    welcome_msg = """🎰 **BIENVENUE DANS L'ELITE DES GAGNANTS!** 🎰
+
+💎 Vous venez de découvrir le bot de prédiction Baccarat le plus avancé du marché!
+
+🚀 **Ce qui vous attend:**
+• Prédictions basées sur des algorithmes statistiques de pointe
+• Analyse en temps réel des patterns gagnants
+• Taux de réussite optimisé par IA
+• 60 MINUTES D'ESSAI GRATUIT pour tester la puissance du système!
+
+💰 **Nos utilisateurs gagnants** profitent déjà d'un avantage statistique significatif.
+
+👇 **Commençons votre inscription!**"""
+    
+    await event.respond(welcome_msg)
+    
+    # DÉMARRER LE PROCESSUS D'INSCRIPTION
+    user_conversation_state[user_id] = 'awaiting_nom'
+    await event.respond("📝 **Étape 1/3: Quel est votre NOM?**")
 
 @client.on(events.NewMessage())
-async def handle_registration_and_payment(event):
-    if event.is_group or event.is_channel: return
-    if event.message.message and event.message.message.startswith('/'): 
-        return
-    
-    user_id = event.sender_id
-    user = get_user(user_id)
-    
-    # Processus d'inscription
-    if user_id in user_conversation_state:
-        state = user_conversation_state[user_id]
-        message_text = event.message.message.strip()
-        
-        if state == 'awaiting_nom':
-            update_user(user_id, {'nom': message_text})
-            user_conversation_state[user_id] = 'awaiting_prenom'
-            await event.respond(f"""✅ **Nom enregistré: {message_text}**
-
-📝 **Étape 2/3: Votre prénom?**
-Cette information nous permet de personnaliser votre expérience.""")
-        
-        elif state == 'awaiting_prenom':
-            update_user(user_id, {'prenom': message_text})
-            user_conversation_state[user_id] = 'awaiting_pays'
-            await event.respond(f"""✅ **Enchanté {message_text}!**
-
-🌍 **Étape 3/3: Votre pays?**
-Cela nous aide à adapter nos services à votre région.""")
-        
-        elif state == 'awaiting_pays':
-            update_user(user_id, {
-                'pays': message_text,
-                'registered': True,
-                'trial_started': datetime.now().isoformat(),
-                'trial_used': False
-            })
-            del user_conversation_state[user_id]
-            
-            success_msg = f"""🎉 **FÉLICITATIONS {user.get('prenom', '').upper()}!** 🎉
-
-✅ Votre compte est ACTIVÉ!
-⏰ **60 MINUTES D'ESSAI GRATUIT** démarrées!
-
-🚀 **Comment ça marche?**
-1️⃣ Je surveille les canaux sources en temps réel
-2️⃣ Mes algorithmes détectent les patterns gagnants
-3️⃣ Vous recevez les prédictions INSTANTANÉMENT ici
-4️⃣ Les résultats se mettent à jour automatiquement
-
-💎 **Ce que vous allez recevoir:**
-• 🎯 Prédictions précises avec couleur à jouer
-• ⚡ Alertes en temps réel
-• 📊 Mises à jour automatiques des résultats
-• 🔥 Accès aux 2 algorithmes (Stats + Cycle)
-
-⚠️ **IMPORTANT:** Restez dans ce chat, ne fermez pas Telegram!
-Les meilleures opportunités arrivent sans prévenir!
-
-🍀 **Bonne chance et bienvenue dans l'élite!**"""
-            
-            await event.respond(success_msg)
-            logger.info(f"Nouvel utilisateur inscrit: {user_id} - {user.get('nom')} {user.get('prenom')}")
-        return
-    
-    # Gestion paiement
-    if user.get('awaiting_screenshot') and event.message.photo:
-        update_user(user_id, {'awaiting_screenshot': False, 'awaiting_amount': True})
-        await event.respond("""📸 **Paiement reçu!**
-
-💰 **Dernière étape:** Indiquez le montant payé:
-• `200` pour 24H
-• `1000` pour 1 semaine  
-• `2000` pour 2 semaines
-
-⏳ Validation sous 5 minutes par notre équipe.""")
-        return
-    
-    if user.get('awaiting_amount'):
-        message_text = event.message.message.strip()
-        if message_text in ['200', '1000', '2000']:
-            amount = message_text
-            update_user(user_id, {'awaiting_amount': False})
-            
-            admin_id = 1190237801
-            user_info = get_user(user_id)
-            
-            if amount == '200':
-                dur_text = "24 heures"
-                dur_code = "1d"
-            elif amount == '1000':
-                dur_text = "1 semaine"
-                dur_code = "1w"
-            else:
-                dur_text = "2 semaines"
-                dur_code = "2w"
-
-            msg_admin = (
-                "🔔 **NOUVELLE DEMANDE D'ABONNEMENT**\n\n"
-                f"👤 **Utilisateur:** {user_info.get('nom')} {user_info.get('prenom')}\n"
-                f"🆔 **ID:** `{user_id}`\n"
-
-
-@client.on(events.CallbackQuery(data=re.compile(b'valider_(\d+)_(.*)')))
-async def handle_validation(event):
-    admin_id = 1190237801
-    if event.sender_id != admin_id:
-        await event.answer("Accès refusé", alert=True)
-        return
-        
-    user_id = int(event.data_match.group(1).decode())
-    duration = event.data_match.group(2).decode()
-    
-    sub_type = 'premium'
-    
-    if duration == '1d':
-        days = 1
-    elif duration == '1w':
-        days = 7
-    else:
-        days = 14
-    
-    end_date = datetime.now() + timedelta(days=days)
-    update_user(user_id, {
-        'subscription_end': end_date.isoformat(),
-        'subscription_type': sub_type,
-        'expiry_notified': False
-    })
-    
-    try:
-        @client.on(events.NewMessage())
 async def handle_registration_and_payment(event):
     if event.is_group or event.is_channel: 
         return
@@ -1125,6 +1004,34 @@ async def handle_registration_and_payment(event):
     
     user_id = event.sender_id
     user = get_user(user_id)
+    
+    # Vérifier si on est en mode envoi de message admin
+    if user_id in admin_message_state:
+        state = admin_message_state[user_id]
+        if state.get('step') == 'awaiting_message':
+            target_user_id = state.get('target_user_id')
+            message_content = event.message.message
+            
+            # Construire le message avec en-tête
+            current_time = datetime.now().strftime("%H:%M:%S")
+            full_message = f"""📨 **Message de {ADMIN_NAME}**
+_{ADMIN_TITLE}_
+
+{message_content}
+
+---
+⏰ Envoyé à {current_time}"""
+            
+            try:
+                await client.send_message(target_user_id, full_message)
+                await event.respond(f"✅ Message envoyé avec succès à l'utilisateur {target_user_id}!")
+                logger.info(f"Message admin envoyé à {target_user_id}")
+            except Exception as e:
+                await event.respond(f"❌ Erreur lors de l'envoi: {e}")
+                logger.error(f"Erreur envoi message admin: {e}")
+            
+            del admin_message_state[user_id]
+            return
     
     # Vérifier si on est en mode inscription
     if user_id in user_conversation_state:
@@ -1215,7 +1122,6 @@ Les meilleures opportunités arrivent sans prévenir!
             amount = message_text
             update_user(user_id, {'awaiting_amount': False})
             
-            admin_id = 1190237801
             user_info = get_user(user_id)
             
             if amount == '200':
@@ -1244,7 +1150,7 @@ Les meilleures opportunités arrivent sans prévenir!
             ]
             
             try:
-                await client.send_message(admin_id, msg_admin, buttons=buttons)
+                await client.send_message(ADMIN_ID, msg_admin, buttons=buttons)
             except Exception as e:
                 logger.error(f"Erreur notification admin: {e}")
 
@@ -1259,7 +1165,118 @@ Les meilleures opportunités arrivent sans prévenir!
         else:
             await event.respond("❌ Montant invalide. Répondez avec `200`, `1000` ou `2000`.")
         return
-activation_msg = f"""🎉 **FÉLICITATIONS! VOTRE ACCÈS EST ACTIVÉ!** 🎉
+
+# ============================================================
+# COMMANDE /users - LISTE DES UTILISATEURS ET ENVOI DE MESSAGES
+# ============================================================
+
+@client.on(events.NewMessage(pattern='/users'))
+async def cmd_users(event):
+    """Affiche la liste de tous les utilisateurs inscrits avec leurs détails."""
+    if event.is_group or event.is_channel: 
+        return
+    
+    if event.sender_id != ADMIN_ID:
+        await event.respond("❌ Commande réservée à l'administrateur.")
+        return
+    
+    if not users_data:
+        await event.respond("📊 Aucun utilisateur inscrit.")
+        return
+    
+    # Construire la liste des utilisateurs
+    users_list = []
+    for user_id_str, user_info in users_data.items():
+        user_id = int(user_id_str)
+        nom = user_info.get('nom', 'N/A') or 'N/A'
+        prenom = user_info.get('prenom', 'N/A') or 'N/A'
+        pays = user_info.get('pays', 'N/A') or 'N/A'
+        status = get_user_status(user_id)
+        
+        user_line = f"🆔 `{user_id}` | {prenom} {nom} | {pays} | {status}"
+        users_list.append(user_line)
+    
+    # Envoyer par groupe de 50 pour éviter les limites Telegram
+    chunk_size = 50
+    for i in range(0, len(users_list), chunk_size):
+        chunk = users_list[i:i+chunk_size]
+        message = f"""📋 **LISTE DES UTILISATEURS** ({i+1}-{min(i+len(chunk), len(users_list))}/{len(users_list)})
+
+{'\n'.join(chunk)}
+
+💡 Pour envoyer un message à un utilisateur, utilisez:
+`/msg ID_UTILISATEUR`"""
+        await event.respond(message)
+        await asyncio.sleep(0.5)  # Petit délai pour éviter le flood
+
+@client.on(events.NewMessage(pattern=r'^/msg (\d+)$'))
+async def cmd_msg(event):
+    """Prépare l'envoi d'un message à un utilisateur spécifique."""
+    if event.is_group or event.is_channel: 
+        return
+    
+    if event.sender_id != ADMIN_ID:
+        await event.respond("❌ Commande réservée à l'administrateur.")
+        return
+    
+    try:
+        target_user_id = int(event.pattern_match.group(1))
+        
+        # Vérifier si l'utilisateur existe
+        if str(target_user_id) not in users_data:
+            await event.respond(f"❌ Utilisateur {target_user_id} non trouvé.")
+            return
+        
+        user_info = users_data[str(target_user_id)]
+        nom = user_info.get('nom', 'N/A')
+        prenom = user_info.get('prenom', 'N/A')
+        
+        # Stocker l'état pour la prochaine réponse
+        admin_message_state[event.sender_id] = {
+            'target_user_id': target_user_id,
+            'step': 'awaiting_message'
+        }
+        
+        await event.respond(f"""✉️ **Envoi de message à {prenom} {nom}** (ID: `{target_user_id}`)
+
+📝 Écrivez votre message ci-dessous.
+Il sera envoyé avec l'en-tête:
+"Message de {ADMIN_NAME} - {ADMIN_TITLE}"
+
+⏰ L'heure d'envoi sera automatiquement ajoutée.
+
+✏️ **Votre message:**""")
+        
+    except Exception as e:
+        await event.respond(f"❌ Erreur: {e}")
+
+@client.on(events.CallbackQuery(data=re.compile(b'valider_(\d+)_(.*)')))
+async def handle_validation(event):
+    if event.sender_id != ADMIN_ID:
+        await event.answer("Accès refusé", alert=True)
+        return
+        
+    user_id = int(event.data_match.group(1).decode())
+    duration = event.data_match.group(2).decode()
+    
+    sub_type = 'premium'
+    
+    if duration == '1d':
+        days = 1
+    elif duration == '1w':
+        days = 7
+    else:
+        days = 14
+    
+    end_date = datetime.now() + timedelta(days=days)
+    update_user(user_id, {
+        'subscription_end': end_date.isoformat(),
+        'subscription_type': sub_type,
+        'expiry_notified': False
+    })
+    
+    try:
+        activation_msg = f"""🎉 **FÉLICITATIONS! VOTRE ACCÈS EST ACTIVÉ!** 🎉
 
 ✅ Abonnement **{days} jour(s)** confirmé!
 🔥 Vous faites maintenant partie de l'ELITE!
@@ -1283,8 +1300,7 @@ activation_msg = f"""🎉 **FÉLICITATIONS! VOTRE ACCÈS EST ACTIVÉ!** 🎉
 
 @client.on(events.CallbackQuery(data=re.compile(b'rejeter_(\d+)')))
 async def handle_rejection(event):
-    admin_id = 1190237801
-    if event.sender_id != admin_id:
+    if event.sender_id != ADMIN_ID:
         await event.answer("Accès refusé", alert=True)
         return
         
@@ -1300,8 +1316,10 @@ async def handle_rejection(event):
 
 @client.on(events.NewMessage(pattern=r'^/a (\d+)$'))
 async def cmd_set_a_shortcut(event):
-    if event.is_group or event.is_channel: return
-    if event.sender_id != ADMIN_ID and ADMIN_ID != 0: return
+    if event.is_group or event.is_channel: 
+        return
+    if event.sender_id != ADMIN_ID: 
+        return
     
     global USER_A
     try:
@@ -1313,8 +1331,10 @@ async def cmd_set_a_shortcut(event):
 
 @client.on(events.NewMessage(pattern=r'^/set_a (\d+)$'))
 async def cmd_set_a(event):
-    if event.is_group or event.is_channel: return
-    if event.sender_id != ADMIN_ID and ADMIN_ID != 0: return
+    if event.is_group or event.is_channel: 
+        return
+    if event.sender_id != ADMIN_ID: 
+        return
     
     global USER_A
     try:
@@ -1326,8 +1346,9 @@ async def cmd_set_a(event):
 
 @client.on(events.NewMessage(pattern='/status'))
 async def cmd_status(event):
-    if event.is_group or event.is_channel: return
-    if event.sender_id != ADMIN_ID and ADMIN_ID != 0:
+    if event.is_group or event.is_channel: 
+        return
+    if event.sender_id != ADMIN_ID:
         await event.respond("Commande admin uniquement")
         return
 
@@ -1352,9 +1373,10 @@ async def cmd_status(event):
 
 @client.on(events.NewMessage(pattern='/bilan'))
 async def cmd_bilan(event):
-    if event.is_group or event.is_channel: return
-    admin_id = 1190237801
-    if event.sender_id != admin_id: return
+    if event.is_group or event.is_channel: 
+        return
+    if event.sender_id != ADMIN_ID: 
+        return
     
     if stats_bilan['total'] == 0:
         await event.respond("📊 Aucune prédiction encore.")
@@ -1377,9 +1399,9 @@ async def cmd_bilan(event):
 
 @client.on(events.NewMessage(pattern='/reset'))
 async def cmd_reset_all(event):
-    if event.is_group or event.is_channel: return
-    admin_id = 1190237801
-    if event.sender_id != admin_id:
+    if event.is_group or event.is_channel: 
+        return
+    if event.sender_id != ADMIN_ID:
         await event.respond("❌ Admin uniquement")
         return
     
@@ -1422,7 +1444,8 @@ async def cmd_reset_all(event):
 
 @client.on(events.NewMessage(pattern='/help'))
 async def cmd_help(event):
-    if event.is_group or event.is_channel: return
+    if event.is_group or event.is_channel: 
+        return
     
     help_msg = """📖 **CENTRE D'AIDE**
 
@@ -1445,7 +1468,8 @@ async def cmd_help(event):
 /start - Votre profil & statut
 /status - État du système (admin)
 /bilan - Statistiques (admin)
-/payer - S'abonner
+/users - Liste utilisateurs (admin)
+/msg ID - Envoyer message (admin)
 
 ❓ **Support:** Contactez @votre_support"""
     
@@ -1453,7 +1477,8 @@ async def cmd_help(event):
 
 @client.on(events.NewMessage(pattern='/payer'))
 async def cmd_payer(event):
-    if event.is_group or event.is_channel: return
+    if event.is_group or event.is_channel: 
+        return
     
     user_id = event.sender_id
     user = get_user(user_id)
