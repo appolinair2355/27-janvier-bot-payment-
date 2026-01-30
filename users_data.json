@@ -13,11 +13,11 @@
     "awaiting_amount": false
   },
   "1190237801": {
-    "registered": false,
-    "nom": null,
-    "prenom": null,
-    "pays": null,
-    "trial_started": null,
+    "registered": true,
+    "nom": "Kouame",
+    "prenom": "Sossou",
+    "pays": "Par",
+    "trial_started": "2026-01-30T12:53:00.479214",
     "trial_used": false,
     "subscription_end": null,
     "subscription_type": null,

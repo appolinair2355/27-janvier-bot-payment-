@@ -26,7 +26,7 @@ API_ID = int(os.getenv('API_ID') or '29177661')
 API_HASH = os.getenv('API_HASH') or 'a8639172fa8d35dbfd8ea46286d349ab'
 BOT_TOKEN = os.getenv('BOT_TOKEN') or '8108980315:AAEvSnp9DguUUO31rbZztoCcM_I2LC3a6HY'
 
-PORT = int(os.getenv('PORT') or '5000')  # Port 5000 for Replit/Render
+PORT = int(os.getenv('PORT') or '10000')  # Port 10000 for Render deployment
 
 # NOUVEAU MAPPING : Miroirs selon les instructions utilisateur
 SUIT_MAPPING = {

@@ -103,6 +103,8 @@ user_conversation_state = {}
 # État pour la commande /users (envoi de message personnalisé)
 admin_message_state = {}  # {admin_id: {'target_user_id': int, 'step': 'awaiting_message'}}
 
+next_prediction_allowed_at = datetime.now()
+
 def load_users_data():
     global users_data
     try:
@@ -207,10 +209,12 @@ async def send_prediction_to_all_users(prediction_msg: str, target_game: int, ru
     
     # Envoyer à l'admin aussi
     try:
-        admin_msg = await client.send_message(ADMIN_ID, prediction_msg)
-        private_messages[str(ADMIN_ID)] = admin_msg.id
-        logger.info(f"✅ Prédiction envoyée à l'admin {ADMIN_ID}")
-        sent_count += 1
+        if ADMIN_ID and ADMIN_ID != 0:
+            admin_msg = await client.send_message(ADMIN_ID, prediction_msg)
+            private_messages[str(ADMIN_ID)] = admin_msg.id
+            logger.info(f"✅ Prédiction envoyée à l'admin {ADMIN_ID}")
+        else:
+            logger.info("Admin ID non configuré (0), envoi admin ignoré")
     except Exception as e:
         logger.error(f"❌ Erreur envoi à l'admin {ADMIN_ID}: {e}")
         failed_count += 1
@@ -220,6 +224,10 @@ async def send_prediction_to_all_users(prediction_msg: str, target_game: int, ru
         try:
             user_id = int(user_id_str)
             
+            # Skip if it's the admin (already handled) or if it's the bot itself (source of token sometimes ends up in data)
+            if user_id == ADMIN_ID or user_id_str == BOT_TOKEN.split(':')[0]:
+                continue
+
             if not can_receive_predictions(user_id):
                 logger.debug(f"Utilisateur {user_id} non éligible, ignoré")
                 continue
@@ -271,6 +279,8 @@ async def edit_prediction_for_all_users(game_number: int, new_status: str, suit:
             status_text = "✅ TROUVÉ AU 2ÈME!"
         elif new_status == "✅2️⃣":
             status_text = "✅ TROUVÉ AU 3ÈME!"
+        elif new_status == "✅3️⃣":
+            status_text = "✅ TROUVÉ AU 4ÈME!"
         else:
             status_text = f"{new_status}"
             
@@ -407,27 +417,19 @@ async def send_prediction_to_users(target_game: int, predicted_suit: str, base_g
                 logger.info(f"Règle 2 active, Règle 1 ne peut pas prédire #{target_game}")
                 return False
         
-        # Format du message selon la règle - MESSAGES SÉDUISANTS
+        # Format du message selon la règle - MESSAGE SIMPLE
         if rule_type == "R2":
-            prediction_msg = f"""🚀 **ALERTE PRÉDICTION EXCLUSIVE!** 🚀
+            prediction_msg = f"""🎰 **PRÉDICTION #{target_game}**
 
-🎰 Jeu #{target_game}
-🎯 Couleur à jouer: {SUIT_DISPLAY.get(predicted_suit, predicted_suit)}
-⚡ Confiance: HAUTE (Algorithme Stats)
-⏳ Statut: EN ATTENTE...
-
-💎 Cette prédiction est basée sur l'analyse statistique avancée des miroirs.
-
-🔔 Restez attentif, mise à jour automatique du résultat!"""
+🎯 Couleur: {SUIT_DISPLAY.get(predicted_suit, predicted_suit)}
+⏳ Statut: ⏳ EN ATTENTE...
+🤖 Algorithme: de confiance"""
         else:
-            prediction_msg = f"""⚡ **NOUVELLE PRÉDISSION CYCLE!** ⚡
+            prediction_msg = f"""🎰 **PRÉDICTION #{target_game}**
 
-🎰 Jeu #{target_game}
-🎯 Couleur à jouer: {SUIT_DISPLAY.get(predicted_suit, predicted_suit)}
-📊 Algorithme: Cycle Temporel + Pattern "1 part"
-⏳ Statut: EN ATTENTE...
-
-🍀 Bonne chance! Mise à jour automatique à venir..."""
+🎯 Couleur: {SUIT_DISPLAY.get(predicted_suit, predicted_suit)}
+⏳ Statut: ⏳ EN ATTENTE...
+🤖 Algorithme: de confiance"""
 
         # ENVOI À TOUS LES UTILISATEURS
         private_messages = await send_prediction_to_all_users(prediction_msg, target_game, rule_type)
@@ -556,7 +558,8 @@ async def update_prediction_status(game_number: int, new_status: str):
             elif rule_type == "R1":
                 rule1_consecutive_count = 0
                 
-            del pending_predictions[game_number]
+            if game_number in pending_predictions:
+                del pending_predictions[game_number]
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
 
         return True
@@ -598,7 +601,7 @@ async def check_prediction_result(game_number: int, first_group: str):
             if has_suit_in_group(first_group, target_suit):
                 logger.info(f"✅{rattrapage_actuel}️⃣ Trouvé pour #{original_game} au rattrapage!")
                 await update_prediction_status(original_game, f'✅{rattrapage_actuel}️⃣')
-                if target_game != original_game:
+                if target_game != original_game and target_game in pending_predictions:
                     del pending_predictions[target_game]
                 return
             else:
@@ -609,11 +612,12 @@ async def check_prediction_result(game_number: int, first_group: str):
                                    rattrapage=next_rattrapage, original_game=original_game,
                                    rule_type=rule_type)
                     logger.info(f"Échec rattrapage {rattrapage_actuel}, Rattrapage {next_rattrapage} planifié")
-                    del pending_predictions[target_game]
+                    if target_game in pending_predictions:
+                        del pending_predictions[target_game]
                 else:
                     logger.info(f"❌ Définitif pour #{original_game} après 3 rattrapages")
                     await update_prediction_status(original_game, '❌')
-                    if target_game != original_game:
+                    if target_game != original_game and target_game in pending_predictions:
                         del pending_predictions[target_game]
                 return
 
@@ -728,6 +732,7 @@ async def process_prediction_logic_rule1(message_text: str, chat_id: int):
     global last_known_source_game, current_game_number
     global cycle_triggered, waiting_for_one_part, prediction_target_game
     global rule2_active, rule1_consecutive_count
+    global next_prediction_allowed_at
     
     if chat_id != SOURCE_CHANNEL_ID:
         return
@@ -872,6 +877,8 @@ async def handle_message(event):
 
     except Exception as e:
         logger.error(f"Erreur handle_message: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 async def handle_edited_message(event):
     """Gère les messages édités."""
@@ -896,6 +903,8 @@ async def handle_edited_message(event):
 
     except Exception as e:
         logger.error(f"Erreur handle_edited_message: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 # --- Gestion des Messages (Hooks Telethon) ---
 client.add_event_handler(handle_message, events.NewMessage())
@@ -1200,9 +1209,10 @@ async def cmd_users(event):
     chunk_size = 50
     for i in range(0, len(users_list), chunk_size):
         chunk = users_list[i:i+chunk_size]
+        chunk_text = '\n'.join(chunk)
         message = f"""📋 **LISTE DES UTILISATEURS** ({i+1}-{min(i+len(chunk), len(users_list))}/{len(users_list)})
 
-{'\n'.join(chunk)}
+{chunk_text}
 
 💡 Pour envoyer un message à un utilisateur, utilisez:
 `/msg ID_UTILISATEUR`"""
@@ -1352,19 +1362,29 @@ async def cmd_status(event):
         await event.respond("Commande admin uniquement")
         return
 
+    # Calcul du statut détaillé pour les règles
+    r2_status = "En cours de prédiction 🔥" if rule2_active else "Inactif"
+    
+    if rule2_active:
+        r1_status = f"{rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE} (Désactivée car Règle 2 active)"
+    elif rule1_consecutive_count >= MAX_RULE1_CONSECUTIVE:
+        r1_status = f"{rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE} (Limite atteinte)"
+    else:
+        r1_status = f"{rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE}"
+
     status_msg = f"""📊 **STATUT SYSTÈME**
 
-🎮 Jeu actuel: #{current_game_number}
+🎮 Jeu actuel: #{last_source_game_number}
 🔢 Paramètre 'a': {USER_A}
-⏳ Règle 2: {'ACTIVE 🔥' if rule2_active else 'Inactif'}
-⏱️ Règle 1: {rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE}
+⏳ Règle 2: {r2_status}
+⏱️ Règle 1: {r1_status}
 👥 Utilisateurs: {len(users_data)}
 
 **Prédictions actives: {len(pending_predictions)}**"""
     
     if pending_predictions:
         for game_num, pred in sorted(pending_predictions.items()):
-            distance = game_num - current_game_number
+            distance = game_num - last_source_game_number
             ratt = f" [R{pred['rattrapage']}]" if pred.get('rattrapage', 0) > 0 else ""
             rule = pred.get('rule_type', 'R2')
             status_msg += f"\n• #{game_num}{ratt}: {pred['suit']} ({rule}) - {pred['status']} (dans {distance})"
@@ -1471,7 +1491,7 @@ async def cmd_help(event):
 /users - Liste utilisateurs (admin)
 /msg ID - Envoyer message (admin)
 
-❓ **Support:** Contactez @votre_support"""
+❓ **Support:** Contactez @Kouamappoloak"""
     
     await event.respond(help_msg)
 

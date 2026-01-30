@@ -13,3 +13,8 @@ openpyxl
 python-dotenv
 pyyaml
 telethon
+aiohttp
+openpyxl
+python-dotenv
+pyyaml
+telethon
