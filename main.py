@@ -45,44 +45,40 @@ logger.info(f"Configuration: SOURCE_CHANNEL={SOURCE_CHANNEL_ID}, SOURCE_CHANNEL_
 session_string = os.getenv('TELEGRAM_SESSION', '')
 client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
-# Variables Globales d'État
-SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
-TIME_CYCLE = [5, 8, 3, 7, 9, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 5]
-current_time_cycle_index = 0
-next_prediction_allowed_at = datetime.now()
+# --- Variables Globales d'État ---
 
-# Nouvelles variables pour la logique "1 part"
-last_known_source_game = 0      # Dernier numéro vu dans le canal source
-prediction_target_game = None   # Numéro qu'on veut prédire
-waiting_for_one_part = False    # En attente du "1 part"
-cycle_triggered = False         # Le temps cycle est-il arrivé ?
-
-def get_rule1_suit(game_number: int) -> str | None:
-    # Cette fonction est maintenant simplifiée car la logique de cycle est gérée dans process_prediction_logic
-    if game_number < 6 or game_number > 1436 or game_number % 2 != 0 or game_number % 10 == 0:
-        return None
-    
-    count_valid = 0
-    for n in range(6, game_number + 1, 2):
-        if n % 10 != 0:
-            count_valid += 1
-            
-    if count_valid == 0: return None
-    
-    index = (count_valid - 1) % 8
-    return SUIT_CYCLE[index]
-
-scp_cooldown = 0
-scp_history = []  # Historique des impositions SCP
-already_predicted_games = set()  # Pour éviter de prédire le même numéro deux fois
-
+# RÈGLE 2 : Variables pour prédiction par statistiques (Prioritaire)
 pending_predictions = {}
 queued_predictions = {}
 processed_messages = set()
 current_game_number = 0
 last_source_game_number = 0
-rule2_authorized_suit = None
+suit_prediction_counts = {}
+USER_A = 1  # Valeur 'a' pour cible N+a
 
+# RÈGLE 1 : Variables pour prédiction par cycle temps + "1 part" (Fallback)
+SUIT_CYCLE = ['♥', '♦', '♣', '♠', '♦', '♥', '♠', '♣']
+TIME_CYCLE = [5, 8, 3, 7, 9, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 3, 5, 9, 7, 4, 6, 8, 5]
+current_time_cycle_index = 0
+next_prediction_allowed_at = datetime.now()
+
+# Variables pour la logique "1 part" (Règle 1)
+last_known_source_game = 0
+prediction_target_game = None
+waiting_for_one_part = False
+cycle_triggered = False
+
+# Compteur pour limiter la Règle 1 (max 3-4 fois consécutifs)
+rule1_consecutive_count = 0
+MAX_RULE1_CONSECUTIVE = 3  # Max 3 prédictions consécutives pour Règle 1
+
+# Flag pour savoir si une prédiction Règle 2 est en cours
+rule2_active = False
+
+# Stats et autres
+scp_cooldown = 0
+scp_history = []
+already_predicted_games = set()
 stats_bilan = {
     'total': 0,
     'wins': 0,
@@ -196,11 +192,10 @@ async def send_prediction_to_user(user_id: int, prediction_msg: str, target_game
                 await client.send_message(user_id, expiry_msg, buttons=buttons)
                 update_user(user_id, {'expiry_notified': True})
                 logger.info(f"Notification d'expiration envoyée à {user_id}")
-            return
+            return None
 
         sent_msg = await client.send_message(user_id, prediction_msg)
         
-        # Stockage de l'ID du message privé pour édition ultérieure
         user_id_str = str(user_id)
         if target_game not in pending_predictions:
             pending_predictions[target_game] = {'private_messages': {}}
@@ -210,15 +205,15 @@ async def send_prediction_to_user(user_id: int, prediction_msg: str, target_game
             
         pending_predictions[target_game]['private_messages'][user_id_str] = sent_msg.id
         logger.info(f"Prédiction envoyée en privé à {user_id} (Msg ID: {sent_msg.id})")
+        return sent_msg.id
     except Exception as e:
         logger.error(f"Erreur envoi prédiction privée à {user_id}: {e}")
-
+        return None
 
 # --- Fonctions d'Analyse ---
 
 def extract_game_number(message: str):
     """Extrait le numéro de jeu du message."""
-    # Pattern plus flexible pour #N59 ou #N 59
     match = re.search(r"#N\s*(\d+)", message, re.IGNORECASE)
     if match:
         return int(match.group(1))
@@ -227,7 +222,6 @@ def extract_game_number(message: str):
 def parse_stats_message(message: str):
     """Extrait les statistiques du canal source 2."""
     stats = {}
-    # Pattern pour extraire : ♠️ : 9 (23.7 %)
     patterns = {
         '♠': r'♠️?\s*:\s*(\d+)',
         '♥': r'♥️?\s*:\s*(\d+)',
@@ -241,14 +235,11 @@ def parse_stats_message(message: str):
     return stats
 
 def extract_parentheses_groups(message: str):
-    """Extrait le contenu entre parenthèses, y compris les emojis de cartes."""
-    # Pattern pour capturer tout ce qui est entre parenthèses, y compris les caractères spéciaux et emojis
-    # On cherche spécifiquement après un nombre (score)
-    groups = re.findall(r"\d+\(([^)]*)\)", message)
-    return groups
+    """Extrait le contenu entre parenthèses."""
+    return re.findall(r"\(([^)]*)\)", message)
 
 def normalize_suits(group_str: str) -> str:
-    """Remplace les différentes variantes de symboles par un format unique (important pour la détection)."""
+    """Remplace les différentes variantes de symboles par un format unique."""
     normalized = group_str.replace('❤️', '♥').replace('❤', '♥').replace('♥️', '♥')
     normalized = normalized.replace('♠️', '♠').replace('♦️', '♦').replace('♣️', '♣')
     return normalized
@@ -261,98 +252,120 @@ def get_suits_in_group(group_str: str):
 def has_suit_in_group(group_str: str, target_suit: str) -> bool:
     """Vérifie si la couleur cible est présente dans le premier groupe du résultat."""
     normalized = normalize_suits(group_str)
-    # Normalisation du symbole cible pour comparaison robuste
     target_normalized = normalize_suits(target_suit)
-    
-    logger.info(f"DEBUG Vérification: Groupe={normalized}, Cible={target_normalized}")
-    
-    # On vérifie si l'un des caractères de la cible est présent dans le groupe normalisé
-    for char in target_normalized:
-        if char in normalized:
-            logger.info(f"DEBUG Vérification: MATCH TROUVÉ pour {char}")
+    for suit in ALL_SUITS:
+        if suit in target_normalized and suit in normalized:
             return True
     return False
 
 def get_predicted_suit(missing_suit: str) -> str:
     """Applique le mapping personnalisé (couleur manquante -> couleur prédite)."""
-    # Ce mapping est maintenant l'inverse : ♠️<->♣️ et ♥️<->♦️
-    # Assurez-vous que SUIT_MAPPING dans config.py contient :
-    # SUIT_MAPPING = {'♠': '♣', '♣': '♠', '♥': '♦', '♦': '♥'}
     return SUIT_MAPPING.get(missing_suit, missing_suit)
 
-# --- Fonction "1 part" ---
+# --- Fonction "1 part" (Règle 1) ---
 def is_one_part_away(current: int, target: int) -> bool:
     """Vérifie si current est à 1 part de target (current impair et différence de 1)"""
     return current % 2 != 0 and target - current == 1
 
 # --- Logique de Prédiction et File d'Attente ---
 
-async def send_prediction_to_channel(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None):
-    """Envoie la prédiction au canal de prédiction et l'ajoute aux prédictions actives."""
+async def send_prediction_to_channel(target_game: int, predicted_suit: str, base_game: int, 
+                                     rattrapage=0, original_game=None, rule_type="R2"):
+    """Envoie la prédiction et l'ajoute aux prédictions actives."""
+    global rule2_active, rule1_consecutive_count
+    
     try:
-        # Le bot lance une nouvelle prédiction dès que le canal source arrive sur le numéro prédit.
-        # On vérifie s'il y a une prédiction principale active pour un numéro futur.
-        active_auto_predictions = [p for game, p in pending_predictions.items() if p.get('rattrapage', 0) == 0 and game > current_game_number]
-        
-        if rattrapage == 0 and len(active_auto_predictions) >= 1:
-            logger.info(f"Une prédiction automatique pour un numéro futur est déjà active. En attente pour #{target_game}")
-            return None
-
-        # Si c'est un rattrapage, on ne crée pas un nouveau message, on garde la trace
+        # Si c'est un rattrapage, on ne crée pas un nouveau message mais on référence l'original
         if rattrapage > 0:
+            # Récupérer les messages privés de la prédiction originale
+            original_private_msgs = {}
+            if original_game and original_game in pending_predictions:
+                original_private_msgs = pending_predictions[original_game].get('private_messages', {}).copy()
+                logger.info(f"Rattrapage {rattrapage}: récupération de {len(original_private_msgs)} messages privés de l'original #{original_game}")
+            
             pending_predictions[target_game] = {
-                'message_id': 0, # Pas de message pour le rattrapage lui-même
+                'message_id': 0,
                 'suit': predicted_suit,
                 'base_game': base_game,
                 'status': '🔮',
                 'rattrapage': rattrapage,
                 'original_game': original_game,
+                'rule_type': rule_type,
+                'private_messages': original_private_msgs,  # Référence pour mise à jour
                 'created_at': datetime.now().isoformat()
             }
-            logger.info(f"Rattrapage {rattrapage} actif pour #{target_game} (Original #{original_game})")
+            
+            if rule_type == "R2":
+                rule2_active = True
+            logger.info(f"Rattrapage {rattrapage} actif pour #{target_game} (Original #{original_game}, {rule_type})")
             return 0
 
-        # Nouveau format de message plus joli demandé par l'utilisateur
-        prediction_msg = f"🔵{target_game}  🌀 {SUIT_DISPLAY.get(predicted_suit, predicted_suit)} : ⌛"
+        # Vérifier si une prédiction Règle 2 est déjà active pour un numéro futur
+        if rule_type == "R1":
+            active_r2_predictions = [p for game, p in pending_predictions.items() 
+                                    if p.get('rule_type') == 'R2' and p.get('rattrapage', 0) == 0 
+                                    and game > current_game_number]
+            if active_r2_predictions:
+                logger.info(f"Règle 2 active, Règle 1 ne peut pas prédire #{target_game}")
+                return None
+        
+        # Format du message selon la règle
+        if rule_type == "R2":
+            prediction_msg = f"""🌤️ Игра № {target_game}
+🔹 Масть Игроку {SUIT_DISPLAY.get(predicted_suit, predicted_suit)}
+🤖Statut :⌛
+💧 Догон 2 Игры!! (🔰+3 Риск)"""
+        else:
+            prediction_msg = f"🔵{target_game}  🌀 {SUIT_DISPLAY.get(predicted_suit, predicted_suit)} : ⌛"
 
-        # Envoi uniquement aux utilisateurs actifs en chat privé (pas de canal de prédiction)
+        # Envoi aux utilisateurs et stockage des IDs
+        private_messages = {}
         for user_id_str, user_info in users_data.items():
             try:
                 user_id = int(user_id_str)
-                # On envoie seulement à ceux qui ont un abonnement actif ou période d'essai active
-                if can_receive_predictions(user_id):
-                    logger.info(f"Envoi prédiction privée à {user_id}")
-                    await send_prediction_to_user(user_id, prediction_msg, target_game)
-                else:
-                    # Si l'utilisateur est enregistré mais expiré, envoyer notification de blocage
-                    if user_info.get('registered'):
-                        await send_prediction_to_user(user_id, prediction_msg, target_game)
+                if can_receive_predictions(user_id) or user_info.get('registered'):
+                    msg_id = await send_prediction_to_user(user_id, prediction_msg, target_game)
+                    if msg_id:
+                        private_messages[user_id_str] = msg_id
             except Exception as e:
                 logger.error(f"Erreur envoi privé à {user_id_str}: {e}")
 
-        if target_game not in pending_predictions:
-            pending_predictions[target_game] = {}
-            
-        pending_predictions[target_game].update({
-            'message_id': 0, 
+        pending_predictions[target_game] = {
+            'message_id': 0,
             'suit': predicted_suit,
             'base_game': base_game,
             'status': '⌛',
             'check_count': 0,
             'rattrapage': 0,
+            'rule_type': rule_type,
+            'private_messages': private_messages,  # Stockage des IDs pour édition future
             'created_at': datetime.now().isoformat()
-        })
+        }
 
-        logger.info(f"Prédiction active: Jeu #{target_game} - {predicted_suit}")
+        # Mise à jour des flags
+        if rule_type == "R2":
+            rule2_active = True
+            rule1_consecutive_count = 0  # Reset compteur Règle 1
+            logger.info(f"Règle 2 active: Jeu #{target_game} - {predicted_suit}")
+        else:
+            rule1_consecutive_count += 1
+            logger.info(f"Règle 1 active: Jeu #{target_game} - {predicted_suit} (Consécutif: {rule1_consecutive_count})")
+
         return 0
 
     except Exception as e:
         logger.error(f"Erreur envoi prédiction: {e}")
         return None
 
-def queue_prediction(target_game: int, predicted_suit: str, base_game: int, rattrapage=0, original_game=None):
-    """Met une prédiction en file d'attente pour un envoi différé."""
-    # Vérification d'unicité
+def queue_prediction(target_game: int, predicted_suit: str, base_game: int, 
+                    rattrapage=0, original_game=None, rule_type="R2"):
+    """Met une prédiction en file d'attente."""
+    global rule2_active
+    
+    # Si Règle 2 déclenche, on arrête la Règle 1
+    if rule_type == "R2":
+        rule2_active = True
+        
     if target_game in queued_predictions or (target_game in pending_predictions and rattrapage == 0):
         return False
 
@@ -362,78 +375,101 @@ def queue_prediction(target_game: int, predicted_suit: str, base_game: int, ratt
         'base_game': base_game,
         'rattrapage': rattrapage,
         'original_game': original_game,
+        'rule_type': rule_type,
         'queued_at': datetime.now().isoformat()
     }
-    logger.info(f"📋 Prédiction #{target_game} mise en file d'attente (Rattrapage {rattrapage})")
+    logger.info(f"📋 Prédiction #{target_game} mise en file d'attente ({rule_type}, Rattrapage {rattrapage})")
     return True
 
 async def check_and_send_queued_predictions(current_game: int):
-    """Vérifie la file d'attente et envoie les prédictions dès que possible."""
-    global current_game_number
+    """Vérifie la file d'attente et envoie les prédictions."""
+    global current_game_number, rule2_active
     current_game_number = current_game
 
     sorted_queued = sorted(queued_predictions.keys())
 
     for target_game in sorted_queued:
-        # On envoie si le numéro cible est supérieur au numéro actuel
         if target_game >= current_game:
-            pred_data = queued_predictions.get(target_game)
-            if not pred_data:
-                continue
-                
-            # Tentative d'envoi
-            result = await send_prediction_to_channel(
+            pred_data = queued_predictions.pop(target_game)
+            await send_prediction_to_channel(
                 pred_data['target_game'],
                 pred_data['predicted_suit'],
                 pred_data['base_game'],
                 pred_data.get('rattrapage', 0),
-                pred_data.get('original_game')
+                pred_data.get('original_game'),
+                pred_data.get('rule_type', 'R2')
             )
-            
-            # Si l'envoi a réussi (ou si c'était un rattrapage qui ne crée pas de msg)
-            if result is not None:
-                queued_predictions.pop(target_game)
 
 async def update_prediction_status(game_number: int, new_status: str):
-    """Met à jour le message de prédiction avec les statuts ✅0️⃣, ✅1️⃣, ✅2️⃣ ou ❌."""
+    """Met à jour le statut de la prédiction."""
+    global rule2_active, rule1_consecutive_count
+    
     try:
         if game_number not in pending_predictions:
+            logger.warning(f"Tentative de mise à jour pour jeu #{game_number} non trouvé dans pending_predictions")
             return False
 
         pred = pending_predictions[game_number]
         suit = pred['suit']
+        rule_type = pred.get('rule_type', 'R2')
+        rattrapage = pred.get('rattrapage', 0)
+        original_game = pred.get('original_game', game_number)
 
-        # Format du message mis à jour avec le statut
-        updated_msg = f"🔵{game_number}  🌀 {SUIT_DISPLAY.get(suit, suit)} : {new_status}"
+        logger.info(f"Mise à jour statut #{game_number} [{rule_type}] vers {new_status} (rattrapage: {rattrapage})")
+
+        # Format du message mis à jour
+        if rule_type == "R2":
+            updated_msg = f"""🌤️ Игра № {original_game}
+🔹 Масть Игроку {SUIT_DISPLAY.get(suit, suit)}
+🤖Statut :{new_status}
+💧 Догон 2 Игры!! (🔰+3 Риск)"""
+        else:
+            updated_msg = f"🔵{original_game}  🌀 {SUIT_DISPLAY.get(suit, suit)} : {new_status}"
 
         # Édition des messages privés
         private_msgs = pred.get('private_messages', {})
+        logger.info(f"Édition de {len(private_msgs)} messages privés pour le statut {new_status}")
+        
         for user_id_str, msg_id in private_msgs.items():
             try:
                 user_id = int(user_id_str)
                 if can_receive_predictions(user_id):
-                    logger.info(f"Édition message pour {user_id}: {new_status}")
                     await client.edit_message(user_id, msg_id, updated_msg)
+                    logger.info(f"✅ Message édité pour {user_id}: {new_status}")
             except Exception as e:
-                logger.error(f"Erreur édition message pour {user_id_str}: {e}")
+                logger.error(f"❌ Erreur édition message pour {user_id_str}: {e}")
 
         pred['status'] = new_status
         
-        # Mise à jour des statistiques selon le statut
-        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣']:
+        # Mise à jour des statistiques et flags
+        if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '✅3️⃣']:
             stats_bilan['total'] += 1
             stats_bilan['wins'] += 1
-            stats_bilan['win_details'][new_status] += 1
+            stats_bilan['win_details'][new_status] = (stats_bilan['win_details'].get(new_status, 0) + 1)
+            
+            # Si c'était une prédiction Règle 2 sans rattrapage, on libère le flag
+            if rule_type == "R2" and rattrapage == 0:
+                rule2_active = False
+                logger.info("Règle 2 terminée (victoire), Règle 1 peut reprendre")
+            elif rule_type == "R1":
+                rule1_consecutive_count = 0  # Reset si victoire
+                
             del pending_predictions[game_number]
-            # Libération pour la prédiction suivante
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
             
         elif new_status == '❌':
             stats_bilan['total'] += 1
             stats_bilan['losses'] += 1
             stats_bilan['loss_details']['❌'] += 1
+            
+            # Si c'était une prédiction Règle 2 sans rattrapage, on libère
+            if rule_type == "R2" and rattrapage == 0:
+                rule2_active = False
+                logger.info("Règle 2 terminée (perte), Règle 1 peut reprendre")
+            elif rule_type == "R1":
+                rule1_consecutive_count = 0  # Reset si défaite
+                
             del pending_predictions[game_number]
-            # Libération pour la prédiction suivante
             asyncio.create_task(check_and_send_queued_predictions(current_game_number))
 
         return True
@@ -443,140 +479,159 @@ async def update_prediction_status(game_number: int, new_status: str):
         return False
 
 async def check_prediction_result(game_number: int, first_group: str):
-    """Vérifie les résultats selon la séquence ✅0️⃣, ✅1️⃣, ✅2️⃣ ou ❌."""
-    # Normalisation du groupe reçu
-    first_group = normalize_suits(first_group)
+    """Vérifie les résultats selon la séquence ✅0️⃣, ✅1️⃣, ✅2️⃣, ✅3️⃣ ou ❌."""
+    logger.info(f"Vérification résultat pour jeu #{game_number}, groupe: {first_group}")
     
-    # Vérification pour le jeu N (✅0️⃣)
+    # 1. Vérification pour le jeu actuel (Cible N)
     if game_number in pending_predictions:
         pred = pending_predictions[game_number]
-        # Vérifier que ce n'est pas un rattrapage
         if pred.get('rattrapage', 0) == 0:
             target_suit = pred['suit']
+            rule_type = pred.get('rule_type', 'R2')
             if has_suit_in_group(first_group, target_suit):
+                logger.info(f"✅0️⃣ Trouvé pour #{game_number}!")
                 await update_prediction_status(game_number, '✅0️⃣')
                 return
             else:
-                # Échec immédiat, initialiser le compteur de vérification
-                pred['check_count'] = 1
-                logger.info(f"Échec # {game_number}, attente vérification N+1")
-    
-    # Vérification pour le jeu N-1 (✅1️⃣)
-    prev_game = game_number - 1
-    if prev_game in pending_predictions:
-        pred = pending_predictions[prev_game]
-        if pred.get('check_count', 0) == 1:
+                # Échec N, on lance le rattrapage 1 pour N+1
+                next_target = game_number + 1
+                queue_prediction(next_target, target_suit, pred['base_game'], 
+                               rattrapage=1, original_game=game_number, rule_type=rule_type)
+                logger.info(f"Échec # {game_number}, Rattrapage 1 planifié pour #{next_target}")
+
+    # 2. Vérification pour les rattrapages (N-1, N-2, N-3)
+    for target_game, pred in list(pending_predictions.items()):
+        if target_game == game_number and pred.get('rattrapage', 0) > 0:
+            original_game = pred.get('original_game', target_game - pred['rattrapage'])
             target_suit = pred['suit']
+            rattrapage_actuel = pred['rattrapage']
+            rule_type = pred.get('rule_type', 'R2')
+            
             if has_suit_in_group(first_group, target_suit):
-                await update_prediction_status(prev_game, '✅1️⃣')
+                logger.info(f"✅{rattrapage_actuel}️⃣ Trouvé pour #{original_game} au rattrapage!")
+                await update_prediction_status(original_game, f'✅{rattrapage_actuel}️⃣')
+                if target_game != original_game:
+                    del pending_predictions[target_game]
                 return
             else:
-                # Deuxième échec, incrémenter le compteur
-                pred['check_count'] = 2
-                logger.info(f"Échec rattrapage 1 sur #{prev_game}, attente vérification N+2")
-    
-    # Vérification pour le jeu N-2 (✅2️⃣ ou ❌)
-    prev2_game = game_number - 2
-    if prev2_game in pending_predictions:
-        pred = pending_predictions[prev2_game]
-        if pred.get('check_count', 0) == 2:
-            target_suit = pred['suit']
-            if has_suit_in_group(first_group, target_suit):
-                await update_prediction_status(prev2_game, '✅2️⃣')
-            else:
-                # Échec définitif après 3 tentatives
-                await update_prediction_status(prev2_game, '❌')
+                if rattrapage_actuel < 3:
+                    next_rattrapage = rattrapage_actuel + 1
+                    next_target = game_number + 1
+                    queue_prediction(next_target, target_suit, pred['base_game'], 
+                                   rattrapage=next_rattrapage, original_game=original_game,
+                                   rule_type=rule_type)
+                    logger.info(f"Échec rattrapage {rattrapage_actuel}, Rattrapage {next_rattrapage} planifié")
+                    del pending_predictions[target_game]
+                else:
+                    logger.info(f"❌ Définitif pour #{original_game} après 3 rattrapages")
+                    await update_prediction_status(original_game, '❌')
+                    if target_game != original_game:
+                        del pending_predictions[target_game]
+                return
+
+# ============================================================
+# RÈGLE 2 : Prédiction par Statistiques (PRIORITAIRE)
+# ============================================================
 
 async def process_stats_message(message_text: str):
-    """Traite les statistiques du canal 2 pour l'imposition du Système Central."""
-    global rule2_authorized_suit
+    """Traite les statistiques du canal 2 selon les miroirs ♦️<->♠️ et ❤️<->♣️."""
+    global last_source_game_number, suit_prediction_counts, rule2_active
+    
     stats = parse_stats_message(message_text)
     if not stats:
-        rule2_authorized_suit = None
-        return
+        return False  # Pas de déclencheur Règle 2
 
-    # Miroirs : ♠️ <-> ♦️ | ❤️ <-> ♣️
-    miroirs = [('♠', '♦'), ('♥', '♣')]
+    # Miroirs : ♦️<->♠️ et ❤️<->♣️
+    pairs = [('♦', '♠'), ('♥', '♣')]
+    triggered = False
     
-    selected_target_suit = None
-    max_diff = 0
-    
-    for s1, s2 in miroirs:
-        v1 = stats.get(s1, 0)
-        v2 = stats.get(s2, 0)
-        diff = abs(v1 - v2)
-        
-        if diff >= 6:
-            if diff > max_diff:
-                max_diff = diff
-                # REGLE CORRIGEE : On prédit le plus FAIBLE parmi les miroirs
-                selected_target_suit = s1 if v1 < v2 else s2
+    for s1, s2 in pairs:
+        if s1 in stats and s2 in stats:
+            v1, v2 = stats[s1], stats[s2]
+            diff = abs(v1 - v2)
+            
+            if diff >= 10:  # Décalage de 10+ requis
+                # Prédire le plus faible parmi les deux miroirs
+                predicted_suit = s1 if v1 < v2 else s2
                 
-    if selected_target_suit:
-        # Ici rule2_authorized_suit stockera directement le costume à prédire (le plus faible)
-        rule2_authorized_suit = selected_target_suit
-        logger.info(f"Système Central (Imposition) détecté : Écart de {max_diff} sur miroir. Cible faible : {selected_target_suit}")
-    else:
-        rule2_authorized_suit = None
-        logger.info("Système Central (Imposition) : Aucun écart de 6 détecté sur les miroirs.")
+                # Vérifier la limite de 3 prédictions consécutives pour ce costume
+                current_count = suit_prediction_counts.get(predicted_suit, 0)
+                if current_count >= 3:
+                    logger.info(f"Limite de 3 prédictions atteinte pour {predicted_suit}, ignorée.")
+                    continue
 
-async def send_bilan():
-    """Envoie le bilan UNIQUEMENT à l'administrateur."""
-    admin_id = 1190237801
-    
-    if stats_bilan['total'] == 0:
-        try:
-            await client.send_message(admin_id, "📊 Aucune prédiction n'a encore été effectuée.")
-        except Exception as e:
-            logger.error(f"Erreur envoi bilan à l'admin: {e}")
-        return
+                logger.info(f"RÈGLE 2 DÉCLENCHÉE: Décalage {diff} entre {s1}({v1}) et {s2}({v2}). Prédiction: {predicted_suit}")
+                
+                if last_source_game_number > 0:
+                    target_game = last_source_game_number + USER_A
+                    
+                    # Réinitialiser compteur Règle 1 car Règle 2 prend le relais
+                    global rule1_consecutive_count, waiting_for_one_part, cycle_triggered, prediction_target_game
+                    rule1_consecutive_count = 0
+                    waiting_for_one_part = False
+                    cycle_triggered = False
+                    prediction_target_game = None
+                    
+                    if queue_prediction(target_game, predicted_suit, last_source_game_number, rule_type="R2"):
+                        suit_prediction_counts[predicted_suit] = current_count + 1
+                        # Réinitialiser les autres costumes
+                        for s in ALL_SUITS:
+                            if s != predicted_suit:
+                                suit_prediction_counts[s] = 0
+                        triggered = True
+                        rule2_active = True
+                        return True  # Une seule prédiction par message de stats
+    return triggered
 
-    win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
-    loss_rate = (stats_bilan['losses'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
-    
-    msg = (
-        "📊 **BILAN ADMIN**\n\n"
-        f"✅ Taux de réussite : {win_rate:.1f}%\n"
-        f"❌ Taux de perte : {loss_rate:.1f}%\n\n"
-        "**Détails :**\n"
-        f"✅0️⃣ (Immédiat) : {stats_bilan['win_details']['✅0️⃣']}\n"
-        f"✅1️⃣ (1 délai) : {stats_bilan['win_details']['✅1️⃣']}\n"
-        f"✅2️⃣ (2 délais) : {stats_bilan['win_details']['✅2️⃣']}\n"
-        f"❌ (Perdu) : {stats_bilan['loss_details']['❌']}\n"
-        f"\nTotal prédictions : {stats_bilan['total']}"
-    )
-    
-    # Envoi UNIQUEMENT à l'admin
-    try:
-        await client.send_message(admin_id, msg)
-        logger.info(f"✅ Bilan envoyé à l'admin {admin_id}")
-    except Exception as e:
-        logger.error(f"❌ Erreur envoi bilan à l'admin: {e}")
+# ============================================================
+# RÈGLE 1 : Prédiction par Cycle + "1 part" (FALLBACK)
+# ============================================================
 
-# SUPPRIMÉ: auto_bilan_task() n'est plus utilisée (bilan uniquement manuel)
-
-def is_message_finalized(message_text: str) -> bool:
-    """Vérifie si le message contient le mot 'Finalisé', 🔰 ou ✅."""
-    # Un message finalisé contient 🔰 ou ✅. 
-    # S'il contient ⏰, il n'est pas encore finalisé, on doit attendre.
-    return "Finalisé" in message_text or "🔰" in message_text or "✅" in message_text
-
-async def try_launch_prediction():
-    """Tente de lancer la prédiction si la condition '1 part' est remplie."""
+async def try_launch_prediction_rule1():
+    """Tente de lancer la prédiction Règle 1 si condition '1 part' remplie."""
     global waiting_for_one_part, prediction_target_game, cycle_triggered
-    global current_time_cycle_index, next_prediction_allowed_at
+    global current_time_cycle_index, next_prediction_allowed_at, rule1_consecutive_count
+    global rule2_active
+    
+    # Ne pas lancer si Règle 2 est active ou si on a atteint la limite consécutive
+    if rule2_active:
+        logger.info("Règle 2 active, Règle 1 en attente")
+        return False
+        
+    if rule1_consecutive_count >= MAX_RULE1_CONSECUTIVE:
+        logger.info(f"Limite Règle 1 atteinte ({MAX_RULE1_CONSECUTIVE}), attente Règle 2")
+        return False
     
     if not cycle_triggered or prediction_target_game is None:
         return False
     
     # Vérifier la condition "1 part"
     if is_one_part_away(last_known_source_game, prediction_target_game):
-        logger.info(f"Condition '1 part' OK: {last_known_source_game} → {prediction_target_game}")
+        logger.info(f"RÈGLE 1: Condition '1 part' OK: {last_known_source_game} → {prediction_target_game}")
+        
+        # Calculer le costume selon le cycle
+        if prediction_target_game >= 6:
+            count_valid = 0
+            for n in range(6, prediction_target_game + 1, 2):
+                if n % 10 != 0:
+                    count_valid += 1
+            if count_valid > 0:
+                index = (count_valid - 1) % 8
+                predicted_suit = SUIT_CYCLE[index]
+            else:
+                predicted_suit = '♥'
+        else:
+            predicted_suit = '♥'
         
         # Lancer la prédiction
-        success = await execute_prediction(prediction_target_game)
+        success = await send_prediction_to_channel(
+            prediction_target_game, 
+            predicted_suit, 
+            last_known_source_game,
+            rule_type="R1"
+        )
         
-        if success:
+        if success is not None:
             # Réinitialiser les flags et passer au cycle suivant
             waiting_for_one_part = False
             cycle_triggered = False
@@ -586,92 +641,18 @@ async def try_launch_prediction():
             wait_min = TIME_CYCLE[current_time_cycle_index]
             next_prediction_allowed_at = datetime.now() + timedelta(minutes=wait_min)
             current_time_cycle_index = (current_time_cycle_index + 1) % len(TIME_CYCLE)
-            logger.info(f"Cycle consommé. Prochain dans {wait_min} min")
+            logger.info(f"Règle 1: Cycle consommé. Prochain dans {wait_min} min")
             return True
     else:
-        logger.info(f"Attente '1 part': dernier={last_known_source_game}, cible={prediction_target_game}")
+        logger.info(f"Règle 1: Attente '1 part': dernier={last_known_source_game}, cible={prediction_target_game}")
     
     return False
 
-async def execute_prediction(target_game: int) -> bool:
-    """Exécute la logique de prédiction pour un numéro cible."""
-    global scp_cooldown, already_predicted_games
-    
-    if target_game > 1436:
-        return False
-    
-    # Vérification anti-doublon
-    if target_game in already_predicted_games:
-        logger.info(f"Jeu #{target_game} déjà prédit, ignoré.")
-        return False
-    
-    already_predicted_games.add(target_game)
-    logger.info(f"Numéro #{target_game} marqué comme prédit")
-    
-    # 1. Calcul de la Règle 1
-    rule1_suit = None
-    if target_game >= 6:
-        count_valid = 0
-        for n in range(6, target_game + 1, 2):
-            if n % 10 != 0:
-                count_valid += 1
-        if count_valid > 0:
-            index = (count_valid - 1) % 8
-            rule1_suit = SUIT_CYCLE[index]
-            if target_game == 6:
-                rule1_suit = '♥'
-    
-    # 2. Imposition du Système Central
-    scp_imposition_suit = None
-    if rule2_authorized_suit:
-        if scp_cooldown <= 0:
-            scp_imposition_suit = rule2_authorized_suit
-            logger.info(f"SCP: Cible faible détectée: {scp_imposition_suit}")
-        else:
-            logger.info(f"SCP: Cooldown actif ({scp_cooldown})")
-
-    # Logique de décision
-    final_suit = None
-    if scp_imposition_suit and scp_cooldown <= 0:
-        final_suit = scp_imposition_suit
-        logger.info(f"SCP: Système Central s'impose pour #{target_game} -> {final_suit}")
-        
-        scp_history.append({
-            'game': target_game,
-            'suit': final_suit,
-            'time': datetime.now().strftime('%H:%M:%S'),
-            'reason': "Écart détecté"
-        })
-        if len(scp_history) > 10: scp_history.pop(0)
-        
-        scp_cooldown = 1
-        
-        if final_suit != rule1_suit and ADMIN_ID != 0:
-            try:
-                await client.send_message(ADMIN_ID, f"⚠️ **Imposition SCP**\nLe Système Central impose {SUIT_DISPLAY.get(final_suit, final_suit)} pour #{target_game} (Règle 1 {SUIT_DISPLAY.get(rule1_suit, rule1_suit) if rule1_suit else 'None'} ignorée).")
-            except Exception as e:
-                logger.error(f"Erreur notification imposition: {e}")
-    
-    if not final_suit and rule1_suit:
-        final_suit = rule1_suit
-        logger.info(f"SCP: Règle 1 sélectionnée pour #{target_game} -> {final_suit}")
-        if scp_cooldown > 0:
-            scp_cooldown = 0
-            logger.info("SCP: Cooldown réinitialisé")
-
-    if final_suit:
-        queue_prediction(target_game, final_suit, last_known_source_game)
-        await check_and_send_queued_predictions(last_known_source_game)
-        return True
-    else:
-        logger.info(f"SCP: Aucune règle applicable pour #{target_game}")
-        return False
-
-async def process_prediction_logic(message_text: str, chat_id: int):
-    """Gère le déclenchement du cycle de temps et la mise en attente du '1 part'."""
-    global last_source_game_number, current_game_number, scp_cooldown
-    global current_time_cycle_index, next_prediction_allowed_at
-    global cycle_triggered, waiting_for_one_part, prediction_target_game, last_known_source_game
+async def process_prediction_logic_rule1(message_text: str, chat_id: int):
+    """Gère le déclenchement du cycle de temps Règle 1."""
+    global last_known_source_game, current_game_number
+    global cycle_triggered, waiting_for_one_part, prediction_target_game
+    global rule2_active, rule1_consecutive_count
     
     if chat_id != SOURCE_CHANNEL_ID:
         return
@@ -680,23 +661,34 @@ async def process_prediction_logic(message_text: str, chat_id: int):
     if game_number is None:
         return
 
-    # Mettre à jour le dernier numéro connu du canal source
+    # Mettre à jour le dernier numéro connu
     last_known_source_game = game_number
-    logger.info(f"Dernier numéro source mis à jour: #{game_number}")
+    logger.info(f"Règle 1: Dernier numéro source mis à jour: #{game_number}")
     
     # Si on est en attente d'un "1 part", vérifier si c'est maintenant possible
     if waiting_for_one_part and cycle_triggered:
-        success = await try_launch_prediction()
-        if success:
-            return
+        await try_launch_prediction_rule1()
+        return
     
-    # Vérifier si le temps cycle est arrivé
+    # Vérifier si le temps cycle est arrivé ET si on peut prédire (pas de Règle 2 active, pas limite atteinte)
     now = datetime.now()
     if now < next_prediction_allowed_at:
         return
+        
+    if rule2_active:
+        logger.info("Temps cycle arrivé mais Règle 2 active, attente")
+        return
+        
+    if rule1_consecutive_count >= MAX_RULE1_CONSECUTIVE:
+        logger.info(f"Temps cycle arrivé mais limite Règle 1 atteinte ({rule1_consecutive_count}), attente Règle 2")
+        # On reset quand même le timer pour éviter de bloquer indéfiniment
+        wait_min = TIME_CYCLE[current_time_cycle_index]
+        next_prediction_allowed_at = now + timedelta(minutes=wait_min)
+        current_time_cycle_index = (current_time_cycle_index + 1) % len(TIME_CYCLE)
+        return
     
-    # Le temps cycle est arrivé !
-    logger.info(f"Temps cycle arrivé à {now.strftime('%H:%M:%S')}")
+    # Le temps cycle est arrivé et on peut prédire !
+    logger.info(f"RÈGLE 1: Temps cycle arrivé à {now.strftime('%H:%M:%S')}")
     cycle_triggered = True
     
     # Calculer la cible (N+2 valide)
@@ -705,21 +697,34 @@ async def process_prediction_logic(message_text: str, chat_id: int):
         candidate += 1
     
     prediction_target_game = candidate
-    logger.info(f"Cible calculée: #{prediction_target_game}")
+    logger.info(f"Règle 1: Cible calculée: #{prediction_target_game}")
     
     # Essayer de lancer immédiatement si condition "1 part" déjà remplie
-    success = await try_launch_prediction()
+    success = await try_launch_prediction_rule1()
     
     if not success:
         waiting_for_one_part = True
-        logger.info(f"Mise en attente '1 part' pour #{prediction_target_game}")
+        logger.info(f"Règle 1: Mise en attente '1 part' pour #{prediction_target_game}")
+
+# ============================================================
+# Gestion des Messages
+# ============================================================
+
+def is_message_finalized(message: str) -> bool:
+    """Vérifie si le message est finalisé."""
+    if '⏰' in message:
+        return False
+    return '✅' in message or '🔰' in message or '▶️' in message or 'Finalisé' in message
 
 async def process_finalized_message(message_text: str, chat_id: int):
-    """Traite uniquement la vérification des résultats quand le message est finalisé."""
-    global current_game_number
+    """Traite les messages finalisés pour vérification des résultats."""
+    global current_game_number, last_source_game_number
+    
     try:
         if chat_id == SOURCE_CHANNEL_2_ID:
+            # Canal 2: Traiter stats (Règle 2) puis vérifier envois
             await process_stats_message(message_text)
+            await check_and_send_queued_predictions(current_game_number)
             return
 
         if not is_message_finalized(message_text):
@@ -730,15 +735,28 @@ async def process_finalized_message(message_text: str, chat_id: int):
             return
 
         current_game_number = game_number
-        groups = extract_parentheses_groups(message_text)
-        first_group = groups[0] if groups else ""
+        last_source_game_number = game_number
+        
+        # Éviter doublons
+        message_hash = f"{game_number}_{message_text[:50]}"
+        if message_hash in processed_messages:
+            return
+        processed_messages.add(message_hash)
 
-        # Vérification des résultats (seulement quand finalisé)
-        if groups:
-            await check_prediction_result(game_number, groups[0])
+        groups = extract_parentheses_groups(message_text)
+        if len(groups) < 1:
+            return
+            
+        first_group = groups[0]
+
+        # Vérification des résultats pour toutes les prédictions actives
+        await check_prediction_result(game_number, first_group)
+        
+        # Envoi des files d'attente (pour nouvelles prédictions si place libérée)
+        await check_and_send_queued_predictions(game_number)
 
     except Exception as e:
-        logger.error(f"Erreur Finalisé: {e}")
+        logger.error(f"Erreur traitement finalisé: {e}")
 
 async def handle_message(event):
     """Gère les nouveaux messages dans les canaux sources."""
@@ -752,40 +770,47 @@ async def handle_message(event):
             if not str(chat_id).startswith('-100'):
                 chat_id = int(f"-100{abs(chat_id)}")
             
+        logger.info(f"DEBUG: Message reçu de chat_id={chat_id}: {event.message.message[:50]}...")
+
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            # Prédiction avec gestion du "1 part"
-            await process_prediction_logic(message_text, chat_id)
+            
+            # 1. D'abord traiter la logique Règle 1 (cycle temps)
+            await process_prediction_logic_rule1(message_text, chat_id)
+            
+            # 2. Puis traiter le message finalisé pour résultats
+            if is_message_finalized(message_text):
+                await process_finalized_message(message_text, chat_id)
             
             # Commande /info pour l'admin
             if message_text.startswith('/info'):
                 active_preds = len(pending_predictions)
-                history_text = "\n".join([f"🔹 #{h['game']} ({h['suit']}) à {h['time']}" for h in scp_history]) if scp_history else "Aucune imposition récente."
+                rule1_status = f"Consécutifs: {rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE}"
+                rule2_status = "ACTIVE" if rule2_active else "Inactif"
+                
+                history_text = "\n".join([f"🔹 #{h['game']} ({h['suit']}) à {h['time']}" for h in scp_history[-5:]]) if scp_history else "Aucune"
                 
                 info_msg = (
                     "ℹ️ **ÉTAT DU SYSTÈME**\n\n"
                     f"🎮 Jeu actuel: #{current_game_number}\n"
                     f"🔮 Prédictions actives: {active_preds}\n"
-                    f"⏳ Cooldown SCP: {'Actif' if scp_cooldown > 0 else 'Prêt'}\n"
-                    f"⏱️ Cycle en attente: {'Oui' if waiting_for_one_part else 'Non'}\n"
-                    f"🎯 Cible en attente: #{prediction_target_game if prediction_target_game else 'Aucune'}\n"
+                    f"⏳ Règle 2: {rule2_status}\n"
+                    f"⏱️ Règle 1: {rule1_status}\n"
+                    f"🎯 Cible R1: #{prediction_target_game if prediction_target_game else 'Aucune'}\n"
                     f"📍 Dernier source: #{last_known_source_game}\n\n"
                     "📌 **DERNIÈRES IMPOSITIONS SCP :**\n"
-                    f"{history_text}\n\n"
-                    "📈 Le bot suit le cycle de la Règle 1 par défaut."
+                    f"{history_text}"
                 )
                 await event.respond(info_msg)
                 return
-
-            # Vérification si finalisé
-            if is_message_finalized(message_text):
-                await process_finalized_message(message_text, chat_id)
         
         elif chat_id == SOURCE_CHANNEL_2_ID:
             message_text = event.message.message
+            # Canal 2: Règle 2 (stats) + vérification envois
             await process_stats_message(message_text)
             await check_and_send_queued_predictions(current_game_number)
             
+        # Commandes admin
         if sender_id == ADMIN_ID:
             if event.message.message.startswith('/'):
                 logger.info(f"Commande admin reçue: {event.message.message}")
@@ -794,7 +819,7 @@ async def handle_message(event):
         logger.error(f"Erreur handle_message: {e}")
 
 async def handle_edited_message(event):
-    """Gère les messages édités dans les canaux sources."""
+    """Gère les messages édités."""
     try:
         chat = await event.get_chat()
         chat_id = chat.id
@@ -804,8 +829,7 @@ async def handle_edited_message(event):
 
         if chat_id == SOURCE_CHANNEL_ID:
             message_text = event.message.message
-            # Relancer prédiction si besoin
-            await process_prediction_logic(message_text, chat_id)
+            await process_prediction_logic_rule1(message_text, chat_id)
             
             if is_message_finalized(message_text):
                 await process_finalized_message(message_text, chat_id)
@@ -819,7 +843,6 @@ async def handle_edited_message(event):
         logger.error(f"Erreur handle_edited_message: {e}")
 
 # --- Gestion des Messages (Hooks Telethon) ---
-
 client.add_event_handler(handle_message, events.NewMessage())
 client.add_event_handler(handle_edited_message, events.MessageEdited())
 
@@ -831,21 +854,21 @@ async def cmd_start(event):
     
     user_id = event.sender_id
     user = get_user(user_id)
-    
-    # Vérification si l'utilisateur est l'admin pour lui donner accès direct ou après reset
     admin_id = 1190237801
     
     if user.get('registered'):
         if is_user_subscribed(user_id) or user_id == admin_id:
-            sub_type = "Premium (prédictions privées)" if get_subscription_type(user_id) == 'premium' or user_id == admin_id else "Standard"
+            sub_type = "Premium" if get_subscription_type(user_id) == 'premium' or user_id == admin_id else "Standard"
             sub_end = user.get('subscription_end', 'Illimité' if user_id == admin_id else 'N/A')
-            # Si l'utilisateur est abonné, on s'assure que expiry_notified est False pour le futur
             update_user(user_id, {'expiry_notified': False})
             await event.respond(
                 f"🎯 **Bienvenue {user.get('prenom', 'Admin' if user_id == admin_id else '')}!**\n\n"
                 f"✅ Votre accès {sub_type} est actif.\n"
                 f"📅 Expire le: {sub_end[:10] if sub_end and user_id != admin_id else sub_end}\n\n"
-                "Les prédictions sont envoyées en temps réel ici même dans votre chat privé. 🚀"
+                "Les prédictions sont envoyées en temps réel ici même dans votre chat privé. 🚀\n\n"
+                "**Système de prédiction:**\n"
+                "• Règle 2 (Stats): Prioritaire\n"
+                "• Règle 1 (Cycle): Fallback (max 3 consécutifs)"
             )
         elif is_trial_active(user_id):
             trial_start = datetime.fromisoformat(user['trial_started'])
@@ -862,19 +885,12 @@ async def cmd_start(event):
             await event.respond(
                 f"⚠️ **{user.get('prenom', '')}, votre période d'essai est terminée!**\n\n"
                 "Pour continuer à recevoir les prédictions:\n\n"
-                "💰 **1000 FCFA** = 1 semaine (prédictions canal)\n"
-                "💰 **2000 FCFA** = 2 semaines (prédictions privées)\n\n"
+                "💰 **1000 FCFA** = 1 semaine\n"
+                "💰 **2000 FCFA** = 2 semaines\n\n"
                 f"👤 Votre ID: `{user_id}`\n\n"
                 "Cliquez sur le bouton ci-dessous pour payer:",
                 buttons=buttons
             )
-            await asyncio.sleep(2)
-            await event.respond(
-                "📸 **Après paiement:**\n"
-                "1. Envoyez une capture d'écran de votre paiement\n"
-                "2. Indiquez le montant payé (1000 ou 2000)"
-            )
-            update_user(user_id, {'pending_payment': True, 'awaiting_screenshot': True})
     else:
         user_conversation_state[user_id] = 'awaiting_nom'
         await event.respond(
@@ -886,8 +902,6 @@ async def cmd_start(event):
 @client.on(events.NewMessage())
 async def handle_registration_and_payment(event):
     if event.is_group or event.is_channel: return
-    
-    # Ignorer si c'est une commande (commence par /)
     if event.message.message and event.message.message.startswith('/'): 
         return
     
@@ -927,7 +941,7 @@ async def handle_registration_and_payment(event):
                 "Les prédictions seront envoyées ici même dans votre chat privé.\n\n"
                 "Profitez-en! 🎯"
             )
-            logger.info(f"Nouvel utilisateur inscrit: {user_id} - {user.get('nom')} {user.get('prenom')} ({user.get('pays')})")
+            logger.info(f"Nouvel utilisateur inscrit: {user_id}")
         return
     
     if user.get('awaiting_screenshot') and event.message.photo:
@@ -937,7 +951,6 @@ async def handle_registration_and_payment(event):
             "💰 **Quel montant avez-vous payé?**\n"
             "Répondez avec: `200`, `1000` ou `2000`"
         )
-        logger.info(f"Screenshot reçu de l'utilisateur {user_id}")
         return
     
     if user.get('awaiting_amount'):
@@ -946,7 +959,6 @@ async def handle_registration_and_payment(event):
             amount = message_text
             update_user(user_id, {'awaiting_amount': False})
             
-            # Notification admin avec bouton de validation
             admin_id = 1190237801
             user_info = get_user(user_id)
             
@@ -971,24 +983,19 @@ async def handle_registration_and_payment(event):
             )
             
             buttons = [
-                [
-                    Button.inline(f"✅ Valider {dur_text}", data=f"valider_{user_id}_{dur_code}")
-                ],
+                [Button.inline(f"✅ Valider {dur_text}", data=f"valider_{user_id}_{dur_code}")],
                 [Button.inline("❌ Rejeter", data=f"rejeter_{user_id}")]
             ]
             
             try:
-                # Envoyer la notification à l'admin
                 await client.send_message(admin_id, msg_admin, buttons=buttons)
-                logger.info(f"Notification d'abonnement envoyée à l'admin pour {user_id}")
             except Exception as e:
                 logger.error(f"Erreur notification admin: {e}")
 
-            await event.respond("✅ **Demande envoyée !**\nL'administrateur va vérifier votre paiement. Vous recevrez une notification dès que votre accès sera activé.")
-            return
+            await event.respond("✅ **Demande envoyée !**\nL'administrateur va vérifier votre paiement.")
         else:
             await event.respond("❌ Montant invalide. Répondez avec `200`, `1000` ou `2000`.")
-            return
+        return
 
 @client.on(events.CallbackQuery(data=re.compile(b'valider_(\d+)_(.*)')))
 async def handle_validation(event):
@@ -1013,21 +1020,20 @@ async def handle_validation(event):
     update_user(user_id, {
         'subscription_end': end_date.isoformat(),
         'subscription_type': sub_type,
-        'expiry_notified': False  # Reset notification pour le nouvel abonnement
+        'expiry_notified': False
     })
     
-    # Notifier l'utilisateur
     try:
         notif_msg = (
             f"🎉 **Félicitations !**\n\n"
-            f"Votre abonnement de {days//7} semaine(s) est activé avec succès ! ✅\n"
-            "Vous verrez maintenant les prédictions automatiques ici dans votre chat privé. 🚀"
+            f"Votre abonnement est activé avec succès ! ✅\n"
+            "Vous verrez maintenant les prédictions automatiques ici. 🚀"
         )
         await client.send_message(user_id, notif_msg)
     except Exception as e:
         logger.error(f"Erreur notification user {user_id}: {e}")
         
-    await event.edit(f"✅ Abonnement de {days//7} semaine(s) activé pour l'utilisateur {user_id}")
+    await event.edit(f"✅ Abonnement activé pour l'utilisateur {user_id}")
     await event.answer("Abonnement activé !")
 
 @client.on(events.CallbackQuery(data=re.compile(b'rejeter_(\d+)')))
@@ -1040,34 +1046,12 @@ async def handle_rejection(event):
     user_id = int(event.data_match.group(1).decode())
     
     try:
-        await client.send_message(user_id, "❌ Votre demande d'abonnement a été rejetée par l'administrateur. Veuillez contacter le support si vous pensez qu'il s'agit d'une erreur.")
+        await client.send_message(user_id, "❌ Votre demande d'abonnement a été rejetée.")
     except:
         pass
         
     await event.edit(f"❌ Demande rejetée pour l'utilisateur {user_id}")
     await event.answer("Demande rejetée")
-
-@client.on(events.NewMessage(pattern=r'^/tim (\d+)$'))
-async def cmd_set_tim(event):
-    if event.is_group or event.is_channel: return
-    admin_id = 1190237801
-    if event.sender_id != admin_id: return
-    
-    global bilan_interval
-    try:
-        bilan_interval = int(event.pattern_match.group(1))
-        await event.respond(f"✅ Intervalle de bilan mis à jour : {bilan_interval} minutes\nProchain bilan automatique dans environ {bilan_interval} minutes.")
-        logger.info(f"Intervalle de bilan modifié à {bilan_interval} min par l'admin.")
-    except Exception as e:
-        await event.respond(f"❌ Erreur: {e}")
-
-@client.on(events.NewMessage(pattern='/bilan'))
-async def cmd_bilan(event):
-    if event.is_group or event.is_channel: return
-    admin_id = 1190237801
-    if event.sender_id != admin_id: return
-    await send_bilan()
-    await event.respond("✅ Bilan manuel envoyé à l'admin.")
 
 @client.on(events.NewMessage(pattern=r'^/a (\d+)$'))
 async def cmd_set_a_shortcut(event):
@@ -1095,27 +1079,6 @@ async def cmd_set_a(event):
     except Exception as e:
         await event.respond(f"❌ Erreur: {e}")
 
-@client.on(events.NewMessage(pattern='/info'))
-async def cmd_info(event):
-    if event.is_group or event.is_channel: return
-    
-    active_preds = len(pending_predictions)
-    history_text = "\n".join([f"🔹 #{h['game']} ({h['suit']}) à {h['time']}" for h in scp_history]) if scp_history else "Aucune imposition récente."
-    
-    info_msg = (
-        "ℹ️ **ÉTAT DU SYSTÈME**\n\n"
-        f"🎮 Jeu actuel: #{current_game_number}\n"
-        f"🔮 Prédictions actives: {active_preds}\n"
-        f"⏳ Cooldown SCP: {'Actif' if scp_cooldown > 0 else 'Prêt'}\n"
-        f"⏱️ Cycle en attente: {'Oui' if waiting_for_one_part else 'Non'}\n"
-        f"🎯 Cible en attente: #{prediction_target_game if prediction_target_game else 'Aucune'}\n"
-        f"📍 Dernier source: #{last_known_source_game}\n\n"
-        "📌 **DERNIÈRES IMPOSITIONS SCP :**\n"
-        f"{history_text}\n\n"
-        "📈 Le bot suit le cycle de la Règle 1 par défaut."
-    )
-    await event.respond(info_msg)
-
 @client.on(events.NewMessage(pattern='/status'))
 async def cmd_status(event):
     if event.is_group or event.is_channel: return
@@ -1124,20 +1087,49 @@ async def cmd_status(event):
         return
 
     status_msg = f"📊 **État du Bot:**\n\n"
-    status_msg += f"🎮 Jeu actuel (Source 1): #{current_game_number}\n"
-    status_msg += f"📍 Dernier connu source: #{last_known_source_game}\n"
-    status_msg += f"⏱️ Cycle en attente: {'Oui' if waiting_for_one_part else 'Non'}\n"
-    status_msg += f"🎯 Cible: #{prediction_target_game if prediction_target_game else 'Aucune'}\n\n"
+    status_msg += f"🎮 Jeu actuel: #{current_game_number}\n"
+    status_msg += f"🔢 Paramètre 'a': {USER_A}\n"
+    status_msg += f"⏳ Règle 2 active: {'Oui' if rule2_active else 'Non'}\n"
+    status_msg += f"⏱️ Règle 1 consécutifs: {rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE}\n\n"
     
     if pending_predictions:
         status_msg += f"**🔮 Actives ({len(pending_predictions)}):**\n"
         for game_num, pred in sorted(pending_predictions.items()):
             distance = game_num - current_game_number
             ratt = f" (R{pred['rattrapage']})" if pred.get('rattrapage', 0) > 0 else ""
-            status_msg += f"• #{game_num}{ratt}: {pred['suit']} - {pred['status']} (dans {distance})\n"
-    else: status_msg += "**🔮 Aucune prédiction active**\n"
+            rule = pred.get('rule_type', 'R2')
+            status_msg += f"• #{game_num}{ratt}: {pred['suit']} [{rule}] - {pred['status']} (dans {distance})\n"
+    else: 
+        status_msg += "**🔮 Aucune prédiction active**\n"
 
     await event.respond(status_msg)
+
+@client.on(events.NewMessage(pattern='/bilan'))
+async def cmd_bilan(event):
+    if event.is_group or event.is_channel: return
+    admin_id = 1190237801
+    if event.sender_id != admin_id: return
+    
+    if stats_bilan['total'] == 0:
+        await event.respond("📊 Aucune prédiction n'a encore été effectuée.")
+        return
+
+    win_rate = (stats_bilan['wins'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
+    loss_rate = (stats_bilan['losses'] / stats_bilan['total']) * 100 if stats_bilan['total'] > 0 else 0
+    
+    msg = (
+        "📊 **BILAN ADMIN**\n\n"
+        f"✅ Taux de réussite : {win_rate:.1f}%\n"
+        f"❌ Taux de perte : {loss_rate:.1f}%\n\n"
+        "**Détails :**\n"
+        f"✅0️⃣ (Immédiat) : {stats_bilan['win_details'].get('✅0️⃣', 0)}\n"
+        f"✅1️⃣ (1 délai) : {stats_bilan['win_details'].get('✅1️⃣', 0)}\n"
+        f"✅2️⃣ (2 délais) : {stats_bilan['win_details'].get('✅2️⃣', 0)}\n"
+        f"❌ (Perdu) : {stats_bilan['loss_details'].get('❌', 0)}\n"
+        f"\nTotal prédictions : {stats_bilan['total']}"
+    )
+    
+    await event.respond(msg)
 
 @client.on(events.NewMessage(pattern='/reset'))
 async def cmd_reset_all(event):
@@ -1149,18 +1141,19 @@ async def cmd_reset_all(event):
     
     global users_data, pending_predictions, queued_predictions, processed_messages
     global current_game_number, last_source_game_number, stats_bilan
-    global current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
+    global rule1_consecutive_count, rule2_active, suit_prediction_counts
     global last_known_source_game, prediction_target_game, waiting_for_one_part, cycle_triggered
+    global current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
     
-    # Réinitialisation des données utilisateurs (efface tous les IDs et abonnements)
+    # Reset complet
     users_data = {}
     save_users_data()
-    
-    # Réinitialisation des prédictions, stats et cycles
     pending_predictions.clear()
     queued_predictions.clear()
     processed_messages.clear()
     already_predicted_games.clear()
+    suit_prediction_counts.clear()
+    
     current_game_number = 0
     last_source_game_number = 0
     last_known_source_game = 0
@@ -1169,6 +1162,10 @@ async def cmd_reset_all(event):
     cycle_triggered = False
     current_time_cycle_index = 0
     next_prediction_allowed_at = datetime.now()
+    
+    rule1_consecutive_count = 0
+    rule2_active = False
+    
     stats_bilan = {
         'total': 0,
         'wins': 0,
@@ -1178,51 +1175,33 @@ async def cmd_reset_all(event):
     }
     
     logger.warning(f"🚨 RESET TOTAL effectué par l'admin {event.sender_id}")
-    await event.respond("🚨 **RÉINITIALISATION TOTALE EFFECTUÉE** 🚨\n\n- Tous les comptes et abonnements ont été supprimés.\n- Même l'administrateur doit se réinscrire et valider son accès pour voir les prédictions.\n- Les statistiques et cycles ont été remis à zéro.")
-
-@client.on(events.NewMessage(pattern='/dif'))
-async def cmd_dif(event):
-    if event.is_group or event.is_channel: return
-    admin_id = 1190237801
-    if event.sender_id != admin_id:
-        await event.respond("❌ Commande réservée à l'administrateur principal.")
-        return
-    
-    # Extraction du message après /dif
-    message = event.message.message[4:].strip()
-    if not message:
-        await event.respond("❌ Utilisation: `/dif <message>`")
-        return
-    
-    count = 0
-    for user_id_str in users_data.keys():
-        try:
-            await client.send_message(int(user_id_str), f"📢 **MESSAGE DE L'ADMINISTRATEUR**\n\n{message}")
-            count += 1
-        except:
-            pass
-    
-    await event.respond(f"✅ Message diffusé à {count} utilisateurs.")
+    await event.respond("🚨 **RÉINITIALISATION TOTALE EFFECTUÉE** 🚨")
 
 @client.on(events.NewMessage(pattern='/help'))
 async def cmd_help(event):
     if event.is_group or event.is_channel: return
-    await event.respond("""📖 **Aide - Bot de Prédiction Baccarat**
+    await event.respond("""📖 **Aide - Bot de Prédiction V2**
 
-**🎯 Comment ça marche:**
-1. Inscrivez-vous avec /start
-2. Profitez de 10 minutes d'essai gratuit
-3. Abonnez-vous pour continuer
+**Système de prédiction hybride :**
 
-**💰 Tarifs:**
-- 1000 FCFA = 1 semaine (prédictions en privé)
-- 2000 FCFA = 2 semaines (prédictions en privé)
+**Règle 2 (Prioritaire) - Stats:**
+• Surveille le Canal Source 2 (statistiques)
+• Déclenchement: Décalage ≥10 entre miroirs ♦️<->♠️ ou ❤️<->♣️
+• Prédit le plus FAIBLE des deux
+• Max 3 prédictions consécutives par costume
+• Cible: Dernier numéro Source 1 + a
 
-**📝 Commandes:**
-- `/start` - Démarrer / État de l'abonnement
-- `/payer` - S'abonner ou renouveler
-- `/help` - Cette aide
-- `/info` - Informations système
+**Règle 1 (Fallback) - Cycle:**
+• S'active si Règle 2 ne trouve pas de déclencheur
+• Basée sur cycle de temps + condition "1 part"
+• Max 3 prédictions consécutives
+• S'arrête immédiatement si Règle 2 se déclenche
+
+**Commandes :**
+- `/status` : État du système
+- `/set_a <valeur>` : Modifie le paramètre 'a'
+- `/info` : Informations détaillées
+- `/bilan` : Statistiques (admin)
 """)
 
 @client.on(events.NewMessage(pattern='/payer'))
@@ -1244,33 +1223,32 @@ async def cmd_payer(event):
     await event.respond(
         "💳 **ABONNEMENT - Bot de Prédiction**\n\n"
         "**Tarifs:**\n"
-        "💰 **200 FCFA** = 24 heures (privé)\n"
-        "💰 **1000 FCFA** = 1 semaine (privé)\n"
-        "💰 **2000 FCFA** = 2 semaines (privé)\n\n"
+        "💰 **200 FCFA** = 24 heures\n"
+        "💰 **1000 FCFA** = 1 semaine\n"
+        "💰 **2000 FCFA** = 2 semaines\n\n"
         f"👤 Votre ID: `{user_id}`\n\n"
-        "Choisissez votre durée et payez via les liens ci-dessous :",
+        "Choisissez votre durée :",
         buttons=buttons
     )
-    await asyncio.sleep(2)
-    await event.respond(
-        "📸 **Après paiement:**\n"
-        "1. Envoyez une capture d'écran de votre paiement\n"
-        "2. Indiquez le montant payé (200, 1000 ou 2000)"
-    )
     update_user(user_id, {'pending_payment': True, 'awaiting_screenshot': True})
-
 
 # --- Serveur Web et Démarrage ---
 
 async def index(request):
-    html = f"""<!DOCTYPE html><html><head><title>Bot Prédiction Baccarat</title></head><body><h1>🎯 Bot de Prédiction Baccarat</h1><p>Le bot est en ligne et surveille les canaux.</p><p><strong>Jeu actuel:</strong> #{current_game_number}</p><p><strong>Dernier source:</strong> #{last_known_source_game}</p><p><strong>Cycle en attente:</strong> {'Oui' if waiting_for_one_part else 'Non'}</p></body></html>"""
+    html = f"""<!DOCTYPE html><html><head><title>Bot Prédiction Baccarat</title></head><body>
+    <h1>🎯 Bot de Prédiction Baccarat</h1>
+    <p>Le bot est en ligne.</p>
+    <p><strong>Jeu actuel:</strong> #{current_game_number}</p>
+    <p><strong>Règle 2 active:</strong> {'Oui' if rule2_active else 'Non'}</p>
+    <p><strong>Règle 1 consécutifs:</strong> {rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE}</p>
+    </body></html>"""
     return web.Response(text=html, content_type='text/html', status=200)
 
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def start_web_server():
-    """Démarre le serveur web pour la vérification de l'état (health check)."""
+    """Démarre le serveur web pour health check."""
     app = web.Application()
     app.router.add_get('/', index)
     app.router.add_get('/health', health_check)
@@ -1281,7 +1259,9 @@ async def start_web_server():
     await site.start() 
 
 async def schedule_daily_reset():
-    """Tâche planifiée pour la réinitialisation quotidienne des stocks de prédiction à 00h59 WAT."""
+    """Reset quotidien à 00h59 WAT."""
+    global rule1_consecutive_count, rule2_active, suit_prediction_counts
+    
     wat_tz = timezone(timedelta(hours=1)) 
     reset_time = time(0, 59, tzinfo=wat_tz)
 
@@ -1294,23 +1274,22 @@ async def schedule_daily_reset():
             target_datetime += timedelta(days=1)
             
         time_to_wait = (target_datetime - now).total_seconds()
-
         logger.info(f"Prochain reset dans {timedelta(seconds=time_to_wait)}")
         await asyncio.sleep(time_to_wait)
 
         logger.warning("🚨 RESET QUOTIDIEN À 00h59 WAT DÉCLENCHÉ!")
         
         global pending_predictions, queued_predictions, processed_messages
-        global last_transferred_game, current_game_number, last_source_game_number
-        global stats_bilan, already_predicted_games
+        global current_game_number, last_source_game_number, stats_bilan
         global last_known_source_game, prediction_target_game, waiting_for_one_part, cycle_triggered
-        global current_time_cycle_index, next_prediction_allowed_at
+        global current_time_cycle_index, next_prediction_allowed_at, already_predicted_games
         
         pending_predictions.clear()
         queued_predictions.clear()
         processed_messages.clear()
         already_predicted_games.clear()
-        last_transferred_game = None
+        suit_prediction_counts.clear()
+        
         current_game_number = 0
         last_source_game_number = 0
         last_known_source_game = 0
@@ -1320,7 +1299,9 @@ async def schedule_daily_reset():
         current_time_cycle_index = 0
         next_prediction_allowed_at = datetime.now()
         
-        # Reset des statistiques de bilan aussi au reset quotidien
+        rule1_consecutive_count = 0
+        rule2_active = False
+        
         stats_bilan = {
             'total': 0,
             'wins': 0,
@@ -1329,55 +1310,31 @@ async def schedule_daily_reset():
             'loss_details': {'❌': 0}
         }
         
-        logger.warning("✅ Toutes les données de prédiction ont été effacées.")
+        logger.warning("✅ Reset effectué.")
 
 async def start_bot():
-    """Démarre le client Telegram et les vérifications initiales."""
-    global source_channel_ok
+    """Démarre le client Telegram."""
     try:
-        logger.info("Démarrage du bot...")
-        
-        # Tentative de connexion avec retry pour gérer les FloodWait
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                await client.connect()
-                if not await client.is_user_authorized():
-                    await client.sign_in(bot_token=BOT_TOKEN)
-                break
-            except Exception as e:
-                err_str = str(e).lower()
-                if "wait of" in err_str:
-                    match = re.search(r"wait of (\d+)", err_str)
-                    wait_seconds = int(match.group(1)) + 5 if match else 30
-                    logger.warning(f"FloodWait détecté: Attente de {wait_seconds} secondes (Essai {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(wait_seconds)
-                else:
-                    raise e
-        
-        source_channel_ok = True
-        logger.info("Bot connecté et prêt pour les chats privés.")
+        await client.start(bot_token=BOT_TOKEN)
+        logger.info("Bot connecté et prêt.")
         return True
     except Exception as e:
         logger.error(f"Erreur démarrage du client Telegram: {e}")
         return False
 
 async def main():
-    """Fonction principale pour lancer le serveur web, le bot et la tâche de reset."""
+    """Fonction principale."""
     load_users_data()
     try:
         await start_web_server()
-
         success = await start_bot()
         if not success:
             logger.error("Échec du démarrage du bot")
             return
 
-        # Lancement des tâches en arrière-plan
         asyncio.create_task(schedule_daily_reset())
-        # SUPPRIMÉ: asyncio.create_task(auto_bilan_task()) - Bilan uniquement manuel
         
-        logger.info("Bot complètement opérationnel - En attente de messages...")
+        logger.info("Bot opérationnel - En attente de messages...")
         await client.run_until_disconnected()
 
     except Exception as e:
@@ -1385,7 +1342,7 @@ async def main():
         import traceback
         logger.error(traceback.format_exc())
     finally:
-        if client and client.is_connected():
+        if client.is_connected():
             await client.disconnect()
 
 if __name__ == '__main__':
