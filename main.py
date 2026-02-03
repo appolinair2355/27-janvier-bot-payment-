@@ -279,9 +279,9 @@ async def edit_prediction_for_all_users(game_number: int, new_status: str, suit:
     # CORRECTION: Calculer le prochain numéro à partir du NUMÉRO DE PRÉDICTION ORIGINAL
     base_game_for_next = original_game if original_game else game_number
 
-    # Afficher le prochain numéro UNIQUEMENT après vérification réussie
+    # Afficher le prochain numéro APRÈS chaque vérification (victoire OU échec)
     next_game_info = ""
-    if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣']:
+    if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '❌']:
         next_game, next_suit = get_next_prediction_info(base_game_for_next, suit)
         next_game_info = f"\n\n📊 **Prochain:** #{next_game} {SUIT_DISPLAY.get(next_suit, next_suit)}"
 
@@ -1940,4 +1940,3 @@ if __name__ == '__main__':
         logger.error(f"Erreur fatale: {e}")
         import traceback
         logger.error(traceback.format_exc())
-
