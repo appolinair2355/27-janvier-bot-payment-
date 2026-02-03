@@ -82,12 +82,6 @@ MAX_RULE1_CONSECUTIVE = 3
 # Flag pour savoir si une prédiction Règle 2 est en cours
 rule2_active = False
 
-# NOUVEAU: Gestion des limites R2
-r2_consecutive_same_suit = {}  # {suit: count}
-MAX_R2_SAME_SUIT = 3
-r2_blocked_until_r1_count = 0  # Nombre de prédictions R1 à attendre
-r2_current_r1_predictions = 0  # Compteur de R1 depuis blocage
-
 # Stats et autres
 already_predicted_games = set()
 stats_bilan = {
@@ -285,9 +279,9 @@ async def edit_prediction_for_all_users(game_number: int, new_status: str, suit:
     # CORRECTION: Calculer le prochain numéro à partir du NUMÉRO DE PRÉDICTION ORIGINAL
     base_game_for_next = original_game if original_game else game_number
 
-    # Afficher le prochain numéro APRÈS chaque vérification (victoire OU échec)
+    # Afficher le prochain numéro UNIQUEMENT après vérification réussie
     next_game_info = ""
-    if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '❌']:
+    if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣']:
         next_game, next_suit = get_next_prediction_info(base_game_for_next, suit)
         next_game_info = f"\n\n📊 **Prochain:** #{next_game} {SUIT_DISPLAY.get(next_suit, next_suit)}"
 
@@ -502,8 +496,14 @@ async def send_prediction_to_users(target_game: int, predicted_suit: str, base_g
 ⏳ Statut: ⏳ EN ATTENTE...
 🤖 Algorithme: de confiance"""
 
-        # CORRECTION: Stocker la prédiction AVANT l'envoi
-        # Même si aucun utilisateur n'est abonné, on garde la trace
+        # ENVOI À TOUS LES UTILISATEURS
+        private_messages = await send_prediction_to_all_users(prediction_msg, target_game, rule_type, predicted_suit)
+
+        if not private_messages:
+            logger.error(f"❌ Aucun utilisateur n'a reçu la prédiction pour #{target_game}")
+            return False
+
+        # Stockage de la prédiction
         pending_predictions[target_game] = {
             'message_id': 0,
             'suit': predicted_suit,
@@ -512,19 +512,9 @@ async def send_prediction_to_users(target_game: int, predicted_suit: str, base_g
             'check_count': 0,
             'rattrapage': 0,
             'rule_type': rule_type,
-            'private_messages': {},  # Sera rempli après envoi
+            'private_messages': private_messages,
             'created_at': datetime.now().isoformat()
         }
-
-        # ENVOI À TOUS LES UTILISATEURS
-        private_messages = await send_prediction_to_all_users(prediction_msg, target_game, rule_type, predicted_suit)
-
-        # Mettre à jour avec les messages envoyés
-        if private_messages:
-            pending_predictions[target_game]['private_messages'] = private_messages
-            logger.info(f"✅ Prédiction #{target_game} envoyée à {len(private_messages)} utilisateurs")
-        else:
-            logger.warning(f"⚠️  Prédiction #{target_game} créée mais aucun utilisateur abonné")
 
         # Mise à jour des flags
         if rule_type == "R2":
@@ -787,18 +777,6 @@ async def check_prediction_result(game_number: int, first_group: str):
 async def process_stats_message(message_text: str):
     """Traite les statistiques du canal 2."""
     global last_source_game_number, suit_prediction_counts, rule2_active
-    global r2_blocked_until_r1_count, r2_current_r1_predictions
-
-    # NOUVEAU: Vérifier si R2 est bloqué (doit attendre 2 prédictions R1)
-    if r2_blocked_until_r1_count > 0:
-        if r2_current_r1_predictions >= r2_blocked_until_r1_count:
-            # Assez de prédictions R1, débloquer
-            r2_blocked_until_r1_count = 0
-            r2_current_r1_predictions = 0
-            logger.info("R2 débloqué après 2 prédictions R1")
-        else:
-            logger.info(f"R2 bloqué, attend encore {r2_blocked_until_r1_count - r2_current_r1_predictions} prédictions R1")
-            return False
 
     stats = parse_stats_message(message_text)
     if not stats:
@@ -985,7 +963,6 @@ async def process_finalized_message(message_text: str, chat_id: int):
 
 async def handle_new_message(event):
     """Gère les nouveaux messages dans les canaux sources - CORRIGÉ."""
-    global last_source_game_number, current_game_number
     try:
         # Récupérer le chat
         chat = await event.get_chat()
@@ -1000,13 +977,6 @@ async def handle_new_message(event):
             normalized_chat_id = chat_id
 
         message_text = event.message.message
-
-        # EXTRAIRE ET METTRE À JOUR LE NUMÉRO IMMÉDIATEMENT
-        game_num = extract_game_number(message_text)
-        if game_num and game_num > last_source_game_number:
-            last_source_game_number = game_num
-            current_game_number = game_num
-            logger.info(f"📊 Dernier numéro vu mis à jour: #{game_num}")
 
         logger.info(f"📨 Message reçu de chat_id={normalized_chat_id}: {message_text[:80]}...")
 
@@ -1970,3 +1940,4 @@ if __name__ == '__main__':
         logger.error(f"Erreur fatale: {e}")
         import traceback
         logger.error(traceback.format_exc())
+
