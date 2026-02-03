@@ -82,6 +82,12 @@ MAX_RULE1_CONSECUTIVE = 3
 # Flag pour savoir si une prédiction Règle 2 est en cours
 rule2_active = False
 
+# NOUVEAU: Gestion des limites R2
+r2_consecutive_same_suit = {}  # {suit: count}
+MAX_R2_SAME_SUIT = 3
+r2_blocked_until_r1_count = 0  # Nombre de prédictions R1 à attendre
+r2_current_r1_predictions = 0  # Compteur de R1 depuis blocage
+
 # Stats et autres
 already_predicted_games = set()
 stats_bilan = {
@@ -777,6 +783,18 @@ async def check_prediction_result(game_number: int, first_group: str):
 async def process_stats_message(message_text: str):
     """Traite les statistiques du canal 2."""
     global last_source_game_number, suit_prediction_counts, rule2_active
+    global r2_blocked_until_r1_count, r2_current_r1_predictions
+
+    # NOUVEAU: Vérifier si R2 est bloqué (doit attendre 2 prédictions R1)
+    if r2_blocked_until_r1_count > 0:
+        if r2_current_r1_predictions >= r2_blocked_until_r1_count:
+            # Assez de prédictions R1, débloquer
+            r2_blocked_until_r1_count = 0
+            r2_current_r1_predictions = 0
+            logger.info("R2 débloqué après 2 prédictions R1")
+        else:
+            logger.info(f"R2 bloqué, attend encore {r2_blocked_until_r1_count - r2_current_r1_predictions} prédictions R1")
+            return False
 
     stats = parse_stats_message(message_text)
     if not stats:
