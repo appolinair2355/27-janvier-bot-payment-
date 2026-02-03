@@ -1,4 +1,41 @@
+"""
+Configuration du bot Telegram de prédiction Baccarat
+"""
 import os
+
+# ID du canal source 1 (Résultats Baccarat) - DERNIER NUMÉRO + VÉRIFICATION
+SOURCE_CHANNEL_ID = -1002682552255
+
+# ID du canal source 2 (Statistiques) - DÉCLENCHEMENT RÈGLE 2
+SOURCE_CHANNEL_2_ID = -1002674389383
+
+# ID de l'administrateur (à configurer via variable d'environnement)
+ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
+
+# API Telegram (obtenir sur https://my.telegram.org)
+API_ID = int(os.getenv('API_ID') or '0')
+API_HASH = os.getenv('API_HASH') or ''
+BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
+
+# Port pour le serveur web (Render.com utilise 10000 par défaut)
+PORT = int(os.getenv('PORT') or '10000')
+
+# MAPPING : Miroirs selon les instructions utilisateur
+SUIT_MAPPING = {
+    '♦': '♠',  # Miroir Carreau <-> Pique
+    '♠': '♦',
+    '♥': '♣',  # Miroir Cœur <-> Trèfle
+    '♣': '♥',
+}
+
+ALL_SUITS = ['♠', '♥', '♦', '♣']
+SUIT_DISPLAY = {
+    '♠': '♠️ Pique (Noir)',
+    '♥': '❤️ Cœur (Rouge)',
+    '♦': '♦️ Carreau (Rouge)',
+    '♣': '♣️ Trèfle (Noir)'
+}
+\n\n######################################################################\n# CODE PRINCIPAL\n######################################################################\n\nimport os
 import asyncio
 import re
 import logging
@@ -286,10 +323,16 @@ async def edit_prediction_for_all_users(game_number: int, new_status: str, suit:
     base_game_for_next = original_game if original_game else game_number
 
     # Afficher le prochain numéro APRÈS chaque vérification (victoire OU échec)
+    # Le prochain numéro est calculé selon le cycle des costumes et le temps de cycle
     next_game_info = ""
     if new_status in ['✅0️⃣', '✅1️⃣', '✅2️⃣', '❌']:
+        # Calculer le prochain numéro (basé sur le cycle actuel + 2)
         next_game, next_suit = get_next_prediction_info(base_game_for_next, suit)
-        next_game_info = f"\n\n📊 **Prochain:** #{next_game} {SUIT_DISPLAY.get(next_suit, next_suit)}"
+
+        # Calculer le temps d'attente selon TIME_CYCLE
+        wait_time = TIME_CYCLE[current_time_cycle_index % len(TIME_CYCLE)]
+
+        next_game_info = f"\n\n📊 **Prochain:** #{next_game} {SUIT_DISPLAY.get(next_suit, next_suit)}\n⏱️ Temps cycle: {wait_time}min"
 
     # Format du message mis à jour
     if is_manual:
@@ -789,6 +832,8 @@ async def process_stats_message(message_text: str):
     global last_source_game_number, suit_prediction_counts, rule2_active
     global r2_blocked_until_r1_count, r2_current_r1_predictions
 
+    logger.info(f"🔍 R2: Analyse stats - Message: {message_text[:100]}...")
+
     # NOUVEAU: Vérifier si R2 est bloqué (doit attendre 2 prédictions R1)
     if r2_blocked_until_r1_count > 0:
         if r2_current_r1_predictions >= r2_blocked_until_r1_count:
@@ -801,7 +846,9 @@ async def process_stats_message(message_text: str):
             return False
 
     stats = parse_stats_message(message_text)
+    logger.info(f"📊 R2: Stats parsées: {stats}")
     if not stats:
+        logger.warning("⚠️  R2: Pas de stats trouvées dans le message")
         return False
 
     pairs = [('♦', '♠'), ('♥', '♣')]
@@ -811,8 +858,10 @@ async def process_stats_message(message_text: str):
             v1, v2 = stats[s1], stats[s2]
             diff = abs(v1 - v2)
 
+            logger.info(f"🔍 R2: Paire {s1}({v1}) vs {s2}({v2}) = diff {diff}")
             if diff >= 10:
                 predicted_suit = s1 if v1 < v2 else s2
+                logger.info(f"✅ R2: Différence {diff} >= 10 détectée! Costume prédit: {predicted_suit}")
 
                 current_count = suit_prediction_counts.get(predicted_suit, 0)
                 if current_count >= 3:
@@ -986,23 +1035,27 @@ async def process_finalized_message(message_text: str, chat_id: int):
 async def handle_new_message(event):
     """Gère les nouveaux messages dans les canaux sources - CORRIGÉ."""
     global last_source_game_number, current_game_number
+
+    # LOG DE DÉBOGAGE: Entrée dans la fonction
+    logger.info(f"🔍 DEBUG: handle_new_message appelé")
+
     try:
         # Récupérer le chat
         chat = await event.get_chat()
         chat_id = chat.id
 
-        # Normaliser l'ID du chat (pour les canaux)
-        if str(chat_id).startswith('-100'):
-            normalized_chat_id = chat_id
-        elif str(chat_id).startswith('-'):
-            normalized_chat_id = int(f"-100{abs(chat_id)}")
-        else:
-            normalized_chat_id = chat_id
+        # LOG DE DÉBOGAGE
+        logger.info(f"🔍 DEBUG: Message reçu du chat: {chat_id}")
+
+        # Comparer directement avec les IDs configurés
+        is_source_1 = (chat_id == SOURCE_CHANNEL_ID)
+        is_source_2 = (chat_id == SOURCE_CHANNEL_2_ID)
 
         message_text = event.message.message
 
         # EXTRAIRE ET METTRE À JOUR LE NUMÉRO IMMÉDIATEMENT
         game_num = extract_game_number(message_text)
+        logger.info(f"🔍 DEBUG: Numéro extrait: {game_num}, last_source: {last_source_game_number}")
         if game_num and game_num > last_source_game_number:
             last_source_game_number = game_num
             current_game_number = game_num
@@ -1011,7 +1064,7 @@ async def handle_new_message(event):
         logger.info(f"📨 Message reçu de chat_id={normalized_chat_id}: {message_text[:80]}...")
 
         # Canal source principal (résultats)
-        if normalized_chat_id == SOURCE_CHANNEL_ID:
+        if is_source_1:
             logger.info(f"✅ Message du canal source 1 détecté")
 
             # Traiter la logique Règle 1
@@ -1021,7 +1074,7 @@ async def handle_new_message(event):
             await process_finalized_message(message_text, SOURCE_CHANNEL_ID)
 
         # Canal source 2 (statistiques)
-        elif normalized_chat_id == SOURCE_CHANNEL_2_ID:
+        elif is_source_2:
             logger.info(f"✅ Message du canal source 2 détecté")
             await process_stats_message(message_text)
             await check_and_send_queued_predictions(current_game_number)
@@ -1486,6 +1539,27 @@ Veuillez entrer les numéros de jeux à prédire.
 **Exemple:** `202,384,786,512`
 
 📝 **Entrez vos numéros:**""")
+
+@client.on(events.NewMessage(pattern='/test'))
+async def cmd_test(event):
+    if event.is_group or event.is_channel:
+        return
+    if event.sender_id != ADMIN_ID:
+        await event.respond("❌ Admin uniquement")
+        return
+
+    # Forcer une prédiction de test
+    test_game = last_source_game_number + 1 if last_source_game_number > 0 else 100
+    test_suit = '♠'
+
+    logger.info(f"🧪 TEST: Création prédiction forcée #{test_game} {test_suit}")
+
+    success = await send_prediction_to_users(test_game, test_suit, test_game - 1, rule_type="TEST")
+
+    if success:
+        await event.respond(f"✅ Prédiction test créée: #{test_game} {test_suit}")
+    else:
+        await event.respond("❌ Échec création prédiction test")
 
 @client.on(events.NewMessage(pattern='/channels'))
 async def cmd_channels(event):
