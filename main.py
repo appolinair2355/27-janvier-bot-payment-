@@ -1267,24 +1267,34 @@ async def cmd_status(event):
     else:
         r1_status = f"{rule1_consecutive_count}/{MAX_RULE1_CONSECUTIVE}"
 
+    # Utiliser last_known_source_game au lieu de last_source_game_number
+    # car last_known_source_game est mis à jour à chaque message (même non finalisé)
+    dernier_numero = last_known_source_game if last_known_source_game > 0 else "N/A"
+    
+    # Calculer la prochaine cible Règle 1 si en attente
+    cible_r1 = f"#{prediction_target_game}" if prediction_target_game else "Aucune"
+    attente_r1 = " (en attente '1 part')" if waiting_for_one_part else ""
+
     status_msg = f"""📊 **STATUT SYSTÈME**
 
-🎮 Jeu actuel: #{last_source_game_number}
+🎮 Dernier numéro source: #{dernier_numero}
 🔢 Paramètre 'a': {USER_A}
 ⏳ Règle 2: {r2_status}
-⏱️ Règle 1: {r1_status}
+⏱️ Règle 1: {r1_status}{attente_r1}
+🎯 Cible Règle 1: {cible_r1}
 👥 Utilisateurs: {len(users_data)}
 
 **Prédictions actives: {len(pending_predictions)}**"""
     
     if pending_predictions:
         for game_num, pred in sorted(pending_predictions.items()):
-            distance = game_num - last_source_game_number
+            distance = game_num - last_known_source_game if last_known_source_game > 0 else "?"
             ratt = f" [R{pred['rattrapage']}]" if pred.get('rattrapage', 0) > 0 else ""
             rule = pred.get('rule_type', 'R2')
             status_msg += f"\n• #{game_num}{ratt}: {pred['suit']} ({rule}) - {pred['status']} (dans {distance})"
 
     await event.respond(status_msg)
+
 
 @client.on(events.NewMessage(pattern='/bilan'))
 async def cmd_bilan(event):
