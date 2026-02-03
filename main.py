@@ -3,28 +3,28 @@ Configuration du bot Telegram de prédiction Baccarat
 """
 import os
 
-# ID du canal source 1 (Résultats Baccarat) - DERNIER NUMÉRO + VÉRIFICATION
+# ID du canal source 1 (Résultats Baccarat) - DERNIER NUMERO + VERIFICATION
 SOURCE_CHANNEL_ID = -1002682552255
 
-# ID du canal source 2 (Statistiques) - DÉCLENCHEMENT RÈGLE 2
+# ID du canal source 2 (Statistiques) - DECLENCHEMENT REGLE 2
 SOURCE_CHANNEL_2_ID = -1002674389383
 
-# ID de l'administrateur (à configurer via variable d'environnement)
+# ID de l'administrateur
 ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
 
-# API Telegram (obtenir sur https://my.telegram.org)
+# API Telegram
 API_ID = int(os.getenv('API_ID') or '0')
 API_HASH = os.getenv('API_HASH') or ''
 BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
 
-# Port pour le serveur web (Render.com utilise 10000 par défaut)
+# Port pour le serveur web
 PORT = int(os.getenv('PORT') or '10000')
 
-# MAPPING : Miroirs selon les instructions utilisateur
+# MAPPING : Miroirs
 SUIT_MAPPING = {
-    '♦': '♠',  # Miroir Carreau <-> Pique
+    '♦': '♠',
     '♠': '♦',
-    '♥': '♣',  # Miroir Cœur <-> Trèfle
+    '♥': '♣',
     '♣': '♥',
 }
 
@@ -35,7 +35,11 @@ SUIT_DISPLAY = {
     '♦': '♦️ Carreau (Rouge)',
     '♣': '♣️ Trèfle (Noir)'
 }
-\n\n######################################################################\n# CODE PRINCIPAL\n######################################################################\n\nimport os
+
+# ==================================================================
+# CODE PRINCIPAL
+# ==================================================================
+import os
 import asyncio
 import re
 import logging
